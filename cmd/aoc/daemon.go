@@ -192,11 +192,38 @@ var daemonCmd = &cobra.Command{
 			}
 		})
 
+		// GC: reap finished workers automatically instead of relying on a human
+		// to run `aoc gc`. Startup sweep clears anything left by a previous
+		// run/crash; the event-driven watcher reaps ephemeral/scheduled workers
+		// shortly after their turn ends; the daily backstop catches what the
+		// other two miss (orphaned sockets, archived-parcelle maître zombies,
+		// completed --process workers whose reapWorker teardown was interrupted).
+		startupGC := runGCSweep(kv, vb, gcSweepOptions{VignobleFilter: vb.Name, Grace: defaultGCGrace})
+		log.Printf("[gc] startup sweep: %d reaped, %d sockets removed", len(startupGC.reaped), len(startupGC.sockets))
+
+		gcWatcher := newBlockedGraceWatcher(kv, vb, mrState, defaultGCGrace)
+		go gcWatcher.Run(ctx)
+
+		go runGCBackstopLoop(ctx, kv, vb)
+
 		// Run tickers
 		go tick(ctx, "mr-watcher", 30*time.Second, func() { mrWatcher.Run() })
 		go tick(ctx, "issue-watcher", 60*time.Second, func() { issueWatcher.Run() })
 		go tick(ctx, "capsule-poller", watcher.CapsulePollInterval(), func() { capsulePoller.Run() })
 		go tick(ctx, "scheduler", 60*time.Second, func() { scheduler.Run() })
+
+		// KV compaction: purge delete markers from pinard-agents so tombstones
+		// from kv.Delete calls don't accumulate in the JetStream stream unbounded.
+		// Removes markers older than 1h; live values are never affected.
+		go tick(ctx, "kv-compactor", 30*time.Minute, func() {
+			before, _ := kv.NumSubjects("pinard-agents")
+			if err := kv.PurgeDeletes("pinard-agents", time.Hour); err != nil {
+				log.Printf("[kv-compactor] PurgeDeletes pinard-agents: %v", err)
+				return
+			}
+			after, _ := kv.NumSubjects("pinard-agents")
+			log.Printf("[kv-compactor] pinard-agents: subjects %d\u2192%d (purged %d markers)", before, after, before-after)
+		})
 
 		// Remote mirror: maintain local tmux mirror sessions for remote agents so
 		// they appear in `tmux ls` without manual `aoc attach` per agent.

@@ -894,7 +894,7 @@ func TestFindSimilarWikiDoc_Empty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, score, err := c.FindSimilarWikiDoc([]float64{1, 0})
+	path, score, err := c.FindSimilarWikiDoc("decision", []float64{1, 0})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -913,7 +913,7 @@ func TestFindSimilarWikiDoc_HitResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, score, err := c.FindSimilarWikiDoc([]float64{1, 0})
+	path, score, err := c.FindSimilarWikiDoc("decision", []float64{1, 0})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -925,6 +925,136 @@ func TestFindSimilarWikiDoc_HitResult(t *testing.T) {
 	}
 }
 
+// TestUpsertWikiDoc_SetsTypeField (#265): the top-level `type` field must
+// mirror frontmatter["type"] so the role-scoped dedup query
+// (FindSimilarWikiDoc) can filter on it without unpacking the FLEXIBLE
+// frontmatter object.
+func TestUpsertWikiDoc_SetsTypeField(t *testing.T) {
+	var capturedVars map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Params []json.RawMessage `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Params) >= 2 {
+			_ = json.Unmarshal(req.Params[1], &capturedVars)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rpcResponse{Result: []rpcResult{{Status: "OK", Result: json.RawMessage(`[{}]`)}}})
+	}))
+	defer srv.Close()
+
+	c, _ := NewWithConfig("g", srv.URL, "u", "p")
+	_, err := c.UpsertWikiDoc("Some Decision", "body", "decisions/some-decision", "summary", 0.9,
+		map[string]any{"type": "decision"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capturedVars["role"] != "decision" {
+		t.Errorf("role var = %v, want %q", capturedVars["role"], "decision")
+	}
+}
+
+// TestSchemaBackfillsWikiDocType (#265 review — BLOCKING): the pre-MR
+// UpsertWikiDoc never set the top-level `type` field, so every doc written
+// before this change has type="" with the role only in frontmatter.type. The
+// role-scoped query (FindSimilarWikiDoc) filters on `type=$role` and would
+// silently match nothing for all of them unless schema.surql backfills it.
+func TestSchemaBackfillsWikiDocType(t *testing.T) {
+	sqlBytes, err := schemaFS.ReadFile("schema.surql")
+	if err != nil {
+		t.Fatalf("read schema.surql: %v", err)
+	}
+	sql := string(sqlBytes)
+	if !strings.Contains(sql, `UPDATE wiki_doc SET type = frontmatter.type`) {
+		t.Error("schema.surql missing the wiki_doc.type backfill from frontmatter.type — role-scoped dedup will match nothing for pre-existing docs")
+	}
+	if !strings.Contains(sql, `WHERE (type = "" OR type = NONE) AND frontmatter.type != NONE`) {
+		t.Error("wiki_doc.type backfill must be gated on empty/NONE type + a real frontmatter.type, so it is idempotent and doesn't clobber already-typed rows")
+	}
+}
+
+// TestSchemaBackfillEnablesRoleScopedDedupForLegacyDocs (#265 review): an
+// end-to-end simulation of the reported failure mode — a legacy wiki_doc row
+// with type="" (frontmatter.type="decision") is invisible to
+// FindSimilarWikiDoc until EnsureSchema runs the backfill migration;
+// afterwards it finds it. The fake server applies the SAME backfill
+// condition the real migration uses, so this exercises the actual
+// EnsureSchema → role-scoped-query pipeline rather than just asserting the
+// SQL text is present.
+func TestSchemaBackfillEnablesRoleScopedDedupForLegacyDocs(t *testing.T) {
+	legacy := struct {
+		path, frontmatterType, typ string
+		hasEmbedding               bool
+	}{
+		path:            "decisions/legacy-decision",
+		frontmatterType: "decision", typ: "", hasEmbedding: true,
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Params []json.RawMessage `json:"params"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		var sql string
+		if len(req.Params) >= 1 {
+			_ = json.Unmarshal(req.Params[0], &sql)
+		}
+		var vars map[string]any
+		if len(req.Params) >= 2 {
+			_ = json.Unmarshal(req.Params[1], &vars)
+		}
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		// Checked before the generic namespace case: schema.surql's own
+		// bootstrap line ("DEFINE NAMESPACE IF NOT EXISTS pinard;", no
+		// backticks) also matches "DEFINE NAMESPACE", so the more specific
+		// backfill statement must be tried first or the big schema-apply
+		// request would be misrouted to the namespace-bootstrap branch.
+		case strings.Contains(sql, "UPDATE wiki_doc SET type = frontmatter.type"):
+			// Apply the exact backfill condition the real migration uses.
+			if legacy.typ == "" && legacy.frontmatterType != "" {
+				legacy.typ = legacy.frontmatterType
+			}
+			json.NewEncoder(w).Encode(rpcResponse{Result: []rpcResult{{Status: "OK", Result: json.RawMessage(`[]`)}}})
+		case strings.Contains(sql, "DEFINE NAMESPACE"):
+			json.NewEncoder(w).Encode(rpcResponse{Result: []rpcResult{{Status: "OK", Result: json.RawMessage(`[{}]`)}}})
+		case strings.Contains(sql, "vector::similarity::cosine"):
+			var rows []map[string]any
+			if role, _ := vars["role"].(string); role != "" && role == legacy.typ && legacy.hasEmbedding {
+				rows = append(rows, map[string]any{"path": legacy.path, "score": 0.95})
+			}
+			b, _ := json.Marshal(rows)
+			json.NewEncoder(w).Encode(rpcResponse{Result: []rpcResult{{Status: "OK", Result: json.RawMessage(b)}}})
+		default:
+			json.NewEncoder(w).Encode(rpcResponse{Result: []rpcResult{{Status: "OK", Result: json.RawMessage(`[]`)}}})
+		}
+	}))
+	defer srv.Close()
+
+	c, err := NewWithConfig("g", srv.URL, "root", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Before the backfill runs, the legacy row's top-level type is still "" so
+	// the role-scoped signal must find nothing (the exact bug the review
+	// flagged: dedup silently goes blind on every pre-existing doc).
+	if path, _, _ := c.FindSimilarWikiDoc("decision", []float64{1, 0}); path != "" {
+		t.Fatalf("FindSimilarWikiDoc before EnsureSchema = %q, want \"\" (type not yet backfilled)", path)
+	}
+
+	if err := c.EnsureSchema(); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	if path, _, err := c.FindSimilarWikiDoc("decision", []float64{1, 0}); err != nil {
+		t.Fatalf("FindSimilarWikiDoc: %v", err)
+	} else if path != legacy.path {
+		t.Errorf("FindSimilarWikiDoc after EnsureSchema = %q, want %q", path, legacy.path)
+	}
+}
 
 // TestSchemaDropsWikiCuratorCursorIndex (#265): the wiki_curator_cursor record id
 // is a deterministic hash, so a UNIQUE index on `source` is redundant and
@@ -939,7 +1069,6 @@ func TestSchemaDropsWikiCuratorCursorIndex(t *testing.T) {
 		t.Error("schema.surql missing REMOVE INDEX for wiki_curator_cursor_source — curator cursor will self-conflict and never advance")
 	}
 }
-
 
 // TestSchemaWikiDocTitleNotUnique (#265): the wiki_doc_title index must be a
 // plain lookup index, never UNIQUE — a UNIQUE title self-conflicts when the

@@ -39,25 +39,29 @@ This guide takes you from nothing to a running vignoble with a conductor.
 
 Pinard ships two ways.
 
-### Container images (k8s services)
+### Container images
 
 Pre-built images are published to **GitHub Container Registry** on every release —
 no credentials needed to pull:
 
 | Image | Contents |
 |-------|----------|
-| `ghcr.io/genentech/pinard` | webterm gateway + memory services + static docs site |
+| `ghcr.io/genentech/pinard` | the agent/worker image — vendored Node/Pi runtime, `aoc`, and `engram`. Runs as régisseur, maître, or vendangeur (worker) depending on the args passed to `pinard`. |
+| `ghcr.io/genentech/pinard-backend` | k8s-hosted backend: webterm gateway + memory services + static docs site |
 | `ghcr.io/genentech/pinard-webterm-gateway` | standalone webterm gateway only |
 
 ```bash
 docker pull ghcr.io/genentech/pinard:latest
+docker pull ghcr.io/genentech/pinard-backend:latest
 docker pull ghcr.io/genentech/pinard-webterm-gateway:latest
 ```
 
-These images are for the **k8s-hosted backend services**. The `aoc` CLI and daemon run
-on your control host — install them from a release bundle or source (below). The
-[engram](https://github.com/Gentleman-Programming/engram) memory backend is a
-third-party binary; install it separately from the upstream release page.
+The `pinard-backend` and `pinard-webterm-gateway` images are for **k8s-hosted backend
+services**; the `pinard` (agent/worker) image is for running a worker (or a
+régisseur/maître) without a host install — e.g. on k8s or an HPC node. It bootstraps
+credentials from `PINARD_UNCORK_URL`/`PINARD_POUR_URL` the same way the Singularity
+(`pinard-base.sif`) build does. For a host install, use a release bundle or source
+(below) instead.
 
 ### From a release bundle (recommended)
 
@@ -220,7 +224,7 @@ webterm on `8080`) and skips the `--gitlab-host` requirement.
 
 ### 1. Start the local service stack
 
-Spin up the `pinard-services` Docker image, which bundles NATS, engram, SurrealDB,
+Spin up the `pinard-solo` Docker image, which bundles NATS, engram, SurrealDB,
 the memory services, and the webterm gateway under one supervisor:
 
 ```bash
@@ -229,7 +233,7 @@ docker run -d \
   -e SURREAL_PASS=changeme \
   -e NATS_VIGNOBLE=myproject \
   -p 4222:4222 -p 7437:7437 -p 8000:8000 -p 8080:8080 \
-  pinard-services:latest
+  pinard-solo:latest
 ```
 
 All persistent state (NATS JetStream store, engram database, SurrealDB) lives under
@@ -256,6 +260,9 @@ aoc daemon start
 
 BYO LLM keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) in `~/.config/pinard/env` are
 passed through to agents automatically — no proxy configuration needed.
+
+To use OpenAI or DeepSeek natively (no Anthropic proxy), also set `models.provider`
+in `vignes.yaml`. See [Custom LLM provider](/docs/configuration/#custom-llm-provider-openai--deepseek) for details.
 
 ### 4. Launch the conductor
 

@@ -1,4 +1,4 @@
-# pinard-services
+# pinard-solo
 
 Single Docker image bundling all services that the k8s cluster provides, for
 local / solo-mode operation:
@@ -18,10 +18,10 @@ memory-ingester → webterm-gateway.
 
 ```bash
 # From repo root:
-cd build/pinard-services
+cd build/pinard-solo
 
 make fetch-binaries   # download nats-server, surreal, engram binaries
-make image            # docker build (tags as pinard-services:latest)
+make image            # docker build (tags as pinard-solo:latest)
 make image-push       # push to ECR
 ```
 
@@ -38,7 +38,7 @@ docker run -d \
   -p 7437:7437 \
   -p 8000:8000 \
   -p 8080:8080 \
-  pinard-services:latest
+  pinard-solo:latest
 ```
 
 ## Environment variables

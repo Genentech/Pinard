@@ -22,7 +22,11 @@ var createUserCmd = &cobra.Command{
 		}
 
 		if _, err := exec.LookPath("nsc"); err != nil {
-			return fmt.Errorf("'nsc' not found. Install: curl -L https://raw.githubusercontent.com/nats-io/nsc/master/install.py | python")
+			return fmt.Errorf("`aoc create-user` only applies to self-hosted nsc/JWT NATS deployments.\n" +
+				"Config-account deployments (Helm/Vault, e.g. production pinard-nats) use a single\n" +
+				"pre-configured account with unrestricted permissions — this command is a no-op for them.\n" +
+				"If you are running a self-hosted nsc/JWT NATS, install nsc first:\n" +
+				"  curl -L https://raw.githubusercontent.com/nats-io/nsc/master/install.py | python")
 		}
 
 		fmt.Printf("Creating NATS account '%s' scoped to vignoble '%s'...\n", name, vignoble)
@@ -35,17 +39,27 @@ var createUserCmd = &cobra.Command{
 			fmt.Printf("  Account '%s' already exists\n", name)
 		}
 
+		// Full allow-list applied on both create and edit, so the grant is
+		// idempotent: re-running against an already-provisioned account updates
+		// the permissions (e.g. to add $KV.pinard-agents.> to live remote workers).
+		allowList := []string{
+			"--allow-pub", fmt.Sprintf("pinard.%s.>", vignoble),
+			"--allow-sub", fmt.Sprintf("pinard.%s.>", vignoble),
+			"--allow-pubsub", "_INBOX.>",
+			"--allow-pubsub", "$JS.>",
+			"--allow-pub", "$KV.pinard-agents.>",
+			"--allow-sub", "$KV.pinard-agents.>",
+		}
+		permDesc := fmt.Sprintf("pinard.%s.>, _INBOX.>, $JS.>, $KV.pinard-agents.>", vignoble)
+
 		// Create user
 		if err := nscRun("describe", "user", "-a", name, "-n", "pinard"); err != nil {
-			nscRun("add", "user", "-a", name, "-n", "pinard",
-				"--allow-pub", fmt.Sprintf("pinard.%s.>", vignoble),
-				"--allow-sub", fmt.Sprintf("pinard.%s.>", vignoble),
-				"--allow-pubsub", "_INBOX.>",
-				"--allow-pubsub", "$JS.>",
-			)
-			fmt.Printf("  User 'pinard' created with permissions: pinard.%s.>\n", vignoble)
+			nscRun(append([]string{"add", "user", "-a", name, "-n", "pinard"}, allowList...)...)
+			fmt.Printf("  User 'pinard' created with permissions: %s\n", permDesc)
 		} else {
-			fmt.Printf("  User 'pinard' already exists\n")
+			// User exists — edit in place to ensure all permissions are current.
+			nscRun(append([]string{"edit", "user", "-a", name, "-n", "pinard"}, allowList...)...)
+			fmt.Printf("  User 'pinard' already exists — permissions updated: %s\n", permDesc)
 		}
 
 		// Push

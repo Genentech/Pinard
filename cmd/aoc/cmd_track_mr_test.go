@@ -6,6 +6,7 @@ import (
 
 	"github.com/Genentech/pinard/internal/config"
 	"github.com/Genentech/pinard/internal/pressoir"
+	"github.com/Genentech/pinard/internal/state"
 )
 
 // mockKV is a simple in-memory KVReader used for testing resolveAgentRecord.
@@ -280,5 +281,81 @@ func TestWebtermLinkAlreadyPosted(t *testing.T) {
 				t.Errorf("webtermLinkAlreadyPosted(%v) = %v, want %v", c.notes, got, c.want)
 			}
 		})
+	}
+}
+
+// TestRegisterWatchedMR_SameMRDifferentSession_NoDuplicate is the regression
+// test for issue #308 defect 1: the same logical agent calling `aoc
+// track-mr` under two different session identities for the same MR (e.g.
+// the issue-driven runID "pinard-swe-305" and the actual session name
+// "webterm--pinard-3058b7433") must not create a second WatchedMR entry.
+func TestRegisterWatchedMR_SameMRDifferentSession_NoDuplicate(t *testing.T) {
+	s := &state.MRWatcherState{
+		Watched: map[string]*state.WatchedMR{
+			"pinard-swe-305": {
+				Name:       "pinard-swe-305",
+				Project:    "pinard",
+				Repo:       "group/pinard",
+				MR:         598,
+				LastNoteID: 4,
+			},
+		},
+	}
+
+	isNew := registerWatchedMR(s, "webterm--pinard-3058b7433", "pinard", "group/pinard", 598, "pinard", "swe")
+
+	if isNew {
+		t.Error("registerWatchedMR should report isNewTracking=false when the MR is already tracked under another key")
+	}
+	if len(s.Watched) != 1 {
+		t.Fatalf("expected exactly 1 watched entry, got %d: %v", len(s.Watched), s.Watched)
+	}
+	existing, ok := s.Watched["pinard-swe-305"]
+	if !ok {
+		t.Fatal("expected the original entry to survive, keyed by its original session")
+	}
+	if existing.LastNoteID != 4 {
+		t.Errorf("LastNoteID should be preserved (not reset), got %d", existing.LastNoteID)
+	}
+	if existing.Parcelle != "pinard" || existing.ProcessName != "swe" {
+		t.Errorf("expected routing fields to be refreshed from the second call, got Parcelle=%q ProcessName=%q", existing.Parcelle, existing.ProcessName)
+	}
+}
+
+// TestRegisterWatchedMR_NewMR_CreatesEntry verifies the ordinary first-time
+// tracking path still creates a new entry.
+func TestRegisterWatchedMR_NewMR_CreatesEntry(t *testing.T) {
+	s := &state.MRWatcherState{}
+
+	isNew := registerWatchedMR(s, "worker-1", "pinard", "group/pinard", 600, "pinard", "swe")
+
+	if !isNew {
+		t.Error("registerWatchedMR should report isNewTracking=true for a brand-new (repo, mr)")
+	}
+	if len(s.Watched) != 1 {
+		t.Fatalf("expected exactly 1 watched entry, got %d", len(s.Watched))
+	}
+	if _, ok := s.Watched["worker-1"]; !ok {
+		t.Fatal("expected new entry to be keyed by the given session name")
+	}
+}
+
+// TestRegisterWatchedMR_SameSessionSameMR_RefreshesInPlace verifies
+// re-tracking under the SAME session does not reset progress fields.
+func TestRegisterWatchedMR_SameSessionSameMR_RefreshesInPlace(t *testing.T) {
+	s := &state.MRWatcherState{
+		Watched: map[string]*state.WatchedMR{
+			"worker-1": {Name: "worker-1", Project: "pinard", Repo: "group/pinard", MR: 600, LastNoteID: 9, ReviewedSHA: "abc"},
+		},
+	}
+
+	isNew := registerWatchedMR(s, "worker-1", "pinard", "group/pinard", 600, "", "")
+
+	if isNew {
+		t.Error("re-tracking the same session+MR should not report isNewTracking=true")
+	}
+	entry := s.Watched["worker-1"]
+	if entry.LastNoteID != 9 || entry.ReviewedSHA != "abc" {
+		t.Errorf("re-tracking must not reset progress fields, got LastNoteID=%d ReviewedSHA=%q", entry.LastNoteID, entry.ReviewedSHA)
 	}
 }

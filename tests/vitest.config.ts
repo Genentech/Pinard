@@ -14,5 +14,6 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 15_000,
     include: ["unit/**/*.test.ts", "integration/**/*.test.ts", "contract/**/*.test.ts"],
+    globalSetup: ["./setup/global-nats-setup.ts"],
   },
 });

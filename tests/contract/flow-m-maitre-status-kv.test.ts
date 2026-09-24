@@ -3,7 +3,7 @@ import { connect } from "@nats-io/transport-node";
 import { Kvm, type KV } from "@nats-io/kv";
 import { randomUUID } from "crypto";
 
-const NATS_URL = process.env.PINARD_NATS_URL || "127.0.0.1:4222";
+const NATS_URL = process.env.PINARD_TEST_NATS_URL || "127.0.0.1:4222";
 
 describe("Contract: pinard-maitre-status KV bucket provisioning and round-trip", () => {
   let nc: Awaited<ReturnType<typeof connect>>;

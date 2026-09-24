@@ -225,6 +225,35 @@ responder tears down the PTY immediately.
 the agent's PTY. Like the browser steer mode, it is operator-only — the grant is
 minted with `ModeRW` and the responder enforces it at both ends.
 
+## Diagnosing missing sessions (`aoc webterm-doctor`) {#aoc-webterm-doctor}
+
+If a worker does not appear in the control-room index (`/sessions`), run:
+
+```bash
+aoc webterm-doctor                           # use the resolved vignoble
+aoc webterm-doctor myproject                 # or pass the vignoble name directly
+aoc webterm-doctor --vignoble-name myproject # or as a flag
+```
+
+`webterm-doctor` connects to NATS, reads all records from the `pinard-agents` KV bucket,
+and prints per-agent include/exclude reasoning that mirrors the logic `buildIndex` uses
+in the gateway. Output columns:
+
+| Column | Meaning |
+|--------|--------|
+| `INCLUDE` | Agent passes all checks and would appear in the index |
+| `EXCLUDE` | Agent fails a check; reason column explains why (vignoble mismatch, stale `lastSeen`, missing name, etc.) |
+| `LOCAL` | Agent is a local tmux session listed via `tmux ls`, not via the KV scan |
+| `ERROR` | KV read failed for this key |
+
+Common exclude reasons: `vignoble mismatch` (the record belongs to a different vignoble),
+`stale: lastSeen=X ago` (heartbeat older than 5 minutes), `lastSeen absent` (no heartbeat
+ever received — check that the worker's `publishState` is reaching NATS).
+
+Keys that are deleted/tombstoned (normal worker teardown leaves a delete marker behind
+until KV compaction runs) are skipped from the table rather than reported as `ERROR`; a
+trailing `(skipped N deleted/tombstoned keys)` line shows how many were filtered.
+
 ## Known limitations
 
 Terminal traffic currently shares one NATS connection (a dedicated account for terminal

@@ -1,10 +1,10 @@
-# pinard-services — single image bundling NATS, engram, SurrealDB, memory services,
+# pinard-solo — single image bundling NATS, engram, SurrealDB, memory services,
 # and the webterm-gateway for local / solo-mode operation (no k8s required).
 #
 # Supervisor: s6-overlay v3. Startup order: nats → engram + surrealdb → memory-ingester → webterm-gateway.
 # All state lives under /data (mount a volume for persistence).
 #
-# Build (from build/pinard-services/):
+# Build (from build/pinard-solo/):
 #   make fetch-binaries   # download nats-server, surreal, engram onto the host
 #   make image            # docker build
 #
@@ -13,7 +13,7 @@
 #     -e SURREAL_PASS=secret \
 #     -e NATS_VIGNOBLE=myvig \
 #     -p 4222:4222 -p 7437:7437 -p 8000:8000 -p 8080:8080 \
-#     pinard-services
+#     pinard-solo
 
 ARG GOLANG=golang:1.24-bookworm
 ARG S6_VERSION=3.1.6.2
@@ -55,15 +55,15 @@ RUN wget -q -O /tmp/s6-overlay.tar.xz \
     && rm /tmp/s6-overlay.tar.xz /tmp/s6-overlay-arch.tar.xz
 
 # ── Third-party binaries (pre-fetched by `make fetch-binaries`) ──────
-# Binaries are fetched by the Makefile into build/pinard-services/build/
+# Binaries are fetched by the Makefile into build/pinard-solo/build/
 # and referenced here relative to the repo-root build context.
-COPY build/pinard-services/build/nats-server /usr/local/bin/nats-server
+COPY build/pinard-solo/build/nats-server /usr/local/bin/nats-server
 RUN chmod +x /usr/local/bin/nats-server
 
-COPY build/pinard-services/build/engram /usr/local/bin/engram
+COPY build/pinard-solo/build/engram /usr/local/bin/engram
 RUN chmod +x /usr/local/bin/engram
 
-COPY build/pinard-services/build/surreal /usr/local/bin/surreal
+COPY build/pinard-solo/build/surreal /usr/local/bin/surreal
 RUN chmod +x /usr/local/bin/surreal
 
 # ── Go binaries (built above) ────────────────────
@@ -73,7 +73,7 @@ COPY --from=builder /out/memory-recall    /usr/local/bin/memory-recall
 COPY --from=builder /out/memory-rollup    /usr/local/bin/memory-rollup
 
 # ── s6-overlay service definitions ───────────────
-COPY build/pinard-services/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
+COPY build/pinard-solo/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
 RUN find /etc/s6-overlay/s6-rc.d -name "run" -o -name "check" | xargs chmod +x
 
 # Persist JetStream store, engram DB, and SurrealDB data across restarts.

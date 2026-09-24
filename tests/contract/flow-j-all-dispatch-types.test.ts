@@ -23,7 +23,7 @@ describe("Contract: All dual-delivery event types dispatch to worker inbox", () 
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("main_pipeline_failed dispatches to worker inbox", async () => {

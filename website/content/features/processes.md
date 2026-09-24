@@ -27,7 +27,7 @@ export default [
     title: 'Align reads → BAM',
     agent: {
       prompt: {
-        role: 'You are driving one step of the GWASDB build on an HPC.',
+        role: 'You are driving one step of a genomics build on an HPC.',
         task: 'source env.sh, run scripts/align.sh (submits a SLURM array, blocks on spoll).',
         instructions: [
           'Success criteria: every array task exits 0 and the provenance DB shows all BAMs written.',
@@ -56,7 +56,7 @@ aoc spawn --run-id genomics-build-42                  # resume where it stopped
 
 The same orchestration that ships code now drives **automation**:
 
-- **Data pipelines** — multi-step HPC/SLURM builds with per-step verification (GWASDB's genome build is a live example)
+- **Data pipelines** — multi-step HPC/SLURM builds with per-step verification (a genomics genome build is a live example)
 - **DevOps** — releases, migrations, environment provisioning with approval gates
 - **Recurring operations** — anything that must be reproducible, auditable, and safe to re-run
 

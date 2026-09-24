@@ -26,7 +26,7 @@ describe("Contract: ACK_REQUIRED events use pending queue with heartbeat", () =>
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("schedule_spawned enters pending queue and does NOT ack immediately", async () => {

@@ -427,6 +427,7 @@ type sessionEntry struct {
 	Step        string `json:"step,omitempty"`
 	Remote      bool   `json:"remote,omitempty"`
 	Unreachable bool   `json:"unreachable,omitempty"`
+	Build       string `json:"build,omitempty"`
 }
 
 type sessionIndex struct {
@@ -548,6 +549,9 @@ func (g *Gateway) buildIndex(v string, reply ListReply) sessionIndex {
 				if st, ok := rec["step"].(string); ok {
 					e.Step = st
 				}
+				if b, ok := rec["build"].(string); ok {
+					e.Build = b
+				}
 			}
 		}
 		idx.Vendangeurs = append(idx.Vendangeurs, e)
@@ -596,6 +600,9 @@ func (g *Gateway) buildIndex(v string, reply ListReply) sessionIndex {
 				}
 				if st, ok := rec["step"].(string); ok {
 					e.Step = st
+				}
+				if b, ok := rec["build"].(string); ok {
+					e.Build = b
 				}
 				idx.Vendangeurs = append(idx.Vendangeurs, e)
 			}

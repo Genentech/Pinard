@@ -121,7 +121,10 @@ func TestControlRoomLiveEnumeration(t *testing.T) {
 		t.Fatalf("tmux conductor: %v", err)
 	}
 	_ = exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", "exo-cli--exo-cli-abc", "sh", "-c", "sleep 60").Run()
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+		_ = os.Remove(tmuxSocketPath(socket))
+	})
 
 	if err := PublishOwner(kv, "exohub", "lelongs"); err != nil {
 		t.Fatal(err)

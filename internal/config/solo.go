@@ -8,7 +8,7 @@ import (
 )
 
 // SoloConfig holds port overrides for solo-mode (local) operation.
-// Defaults match the pinard-services image port layout. On macOS, values are
+// Defaults match the pinard-solo image port layout. On macOS, values are
 // read from ~/Library/Application Support/Pinard/config.json when present.
 type SoloConfig struct {
 	NATSPort    int // default 4222

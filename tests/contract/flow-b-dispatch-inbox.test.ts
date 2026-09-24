@@ -23,7 +23,7 @@ describe("Contract: Conductor dispatches actionable events to worker inbox", () 
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("pipeline_failed dispatches fix instructions to worker inbox", async () => {

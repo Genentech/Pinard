@@ -23,7 +23,7 @@ describe("Contract: Issue watcher events flow to conductor", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("issues_new delivers formatted message with iid, title, and URL", async () => {

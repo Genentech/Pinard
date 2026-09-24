@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { connect, wsconnect, type NatsConnection, type Subscription } from "@nats-io/transport-node";
 import WebSocket from "ws";
 if (!globalThis.WebSocket) (globalThis as any).WebSocket = WebSocket;
-import { jetstream, type JetStreamClient, type JsMsg } from "@nats-io/jetstream";
+import { jetstream, type JetStreamClient } from "@nats-io/jetstream";
 import { Kvm, type KV } from "@nats-io/kv";
 import { registerProxyProvider, seedProxyAuth } from "../shared/provider.js";
 import { updateIssueTool } from "../shared/tools.js";
@@ -193,12 +193,6 @@ function slog(msg: string): void {
 }
 slog("extension module evaluated (= pi boot + extension load)");
 
-// Tags an MR note the conductor posts to direct a worker. The conductor shares
-// the pinard GitLab identity with workers, so the mr-watcher normally ignores
-// pinard-authored notes; one carrying this marker is forwarded to the worker
-// anyway. Keep in sync with conductorMarker in internal/watcher/mrs.go.
-const CONDUCTOR_MARKER = "<!-- pinard:conductor -->";
-
 // ── Régisseur relay guidance (régisseur role only — never maître or vendangeur) ─
 // Injected via before_agent_start gated on !IS_MAITRE. Do NOT add to PINARD.md
 // (which is shared and would leak into maître prompts).
@@ -360,7 +354,6 @@ interface PendingEvent {
   type: string;
   sessionId: string;
   data: Record<string, any>;
-  msg: JsMsg;
   receivedAt: string;
 }
 
@@ -453,20 +446,27 @@ async function checkMemoryStatus(): Promise<void> {
     const resp = JSON.parse(new TextDecoder().decode(msg.data)) as {
       engram?: { reachable?: boolean; pending?: number };
       surrealdb?: { total_lag?: number; total_failed?: number };
-      wiki?: { total_docs?: number; last_rollup?: string };
+      wiki?: { total_docs?: number; last_rollup?: string; groups?: Array<{ docs?: number; git_publish_ok?: boolean }> };
     };
     const lag = resp.surrealdb?.total_lag ?? 0;
     const failed = resp.surrealdb?.total_failed ?? 0;
     const pending = resp.engram?.pending ?? 0;
-    // Wiki health = "is curation/ingestion working", not the human-review backlog.
-    // Stale = the vignoble has wiki docs but the curator/rollup hasn't run in >3d
-    // (or never) — a real signal that wiki ingestion stalled.
+    // Wiki health: stale if any group has docs but git_publish_ok=false (sentinel missing).
+    // Also stale if docs exist but rollup hasn't run in >3d (legacy signal kept for compatibility).
     const wikiDocs = resp.wiki?.total_docs ?? 0;
     const lastRollup = resp.wiki?.last_rollup ?? "";
+    const wikiGroups = resp.wiki?.groups ?? [];
     let wikiStale = false;
     if (wikiDocs > 0) {
-      const ts = lastRollup ? Date.parse(lastRollup) : NaN;
-      wikiStale = Number.isNaN(ts) || (Date.now() - ts) > 3 * 24 * 60 * 60 * 1000;
+      // Primary signal: git publish sentinel per group.
+      const hasUnpublished = wikiGroups.some(g => (g.docs ?? 0) > 0 && g.git_publish_ok === false);
+      if (hasUnpublished) {
+        wikiStale = true;
+      } else {
+        // Fallback: rollup age (ingester may be an older version without git_publish_ok).
+        const ts = lastRollup ? Date.parse(lastRollup) : NaN;
+        wikiStale = Number.isNaN(ts) || (Date.now() - ts) > 3 * 24 * 60 * 60 * 1000;
+      }
     }
     const changed = !memStatusAvailable || lag !== memStatusLag || failed !== memStatusFailed ||
                     wikiStale !== memStatusWikiStale || pending !== memStatusPending;
@@ -553,7 +553,6 @@ function natsPublish(subject: string, data: Record<string, any> | string): void 
 function ackEvent(id: string): boolean {
   const idx = pendingAckEvents.findIndex((e) => e.id === id);
   if (idx === -1) return false;
-  pendingAckEvents[idx].msg.ack();
   pendingAckEvents.splice(idx, 1);
   refreshDashboardWidget();
   refreshStatusLine();
@@ -562,52 +561,26 @@ function ackEvent(id: string): boolean {
 
 function ackAllEvents(): number {
   const count = pendingAckEvents.length;
-  for (const e of pendingAckEvents) e.msg.ack();
   pendingAckEvents.length = 0;
   refreshDashboardWidget();
   refreshStatusLine();
   return count;
 }
 
-// Heartbeat: extend ack deadline on pending messages so NATS doesn't redeliver while alive
+// Kept for session_shutdown cleanup reference; no longer used for heartbeating.
 let inProgressTimer: ReturnType<typeof setInterval> | null = null;
 
-function startInProgressHeartbeat(): void {
-  if (inProgressTimer) return;
-  inProgressTimer = setInterval(() => {
-    for (const e of pendingAckEvents) {
-      try { e.msg.working(); } catch {}
-    }
-  }, 3_000);
-}
-
-function handlePendingMessage(eventType: string, sessionId: string, data: Record<string, any>, msg: JsMsg): void {
-  try {
-    if (ACK_REQUIRED_TYPES.has(eventType)) {
-      // Deduplicate by stream sequence — redeliveries update the msg reference
-      const seq = msg.seq;
-      const existing = pendingAckEvents.find((e) => e.msg.seq === seq);
-      if (existing) {
-        existing.msg = msg;
-        return;
-      }
-      pendingAckEvents.push({
-        id: String(++pendingIdCounter),
-        type: eventType,
-        sessionId,
-        data,
-        msg,
-        receivedAt: new Date().toISOString(),
-      });
-      handleAgentEvent(eventType, sessionId, data);
-      refreshStatusLine();
-    } else {
-      handleAgentEvent(eventType, sessionId, data);
-      msg.ack();
-    }
-  } catch (e) {
-    console.error("[pinard] handlePendingMessage error:", e);
-  }
+function recordPendingEvent(eventType: string, sessionId: string, data: Record<string, any>): void {
+  // Record ACK_REQUIRED event to pendingAckEvents for the dashboard/inbox UI.
+  // JetStream ack is done immediately on receipt — not tied to human ack.
+  pendingAckEvents.push({
+    id: String(++pendingIdCounter),
+    type: eventType,
+    sessionId,
+    data,
+    receivedAt: new Date().toISOString(),
+  });
+  refreshStatusLine();
 }
 
 async function handleAgentEvent(type: string, sessionId: string, data: Record<string, any>): Promise<void> {
@@ -693,7 +666,7 @@ async function handleAgentEvent(type: string, sessionId: string, data: Record<st
   const message = formatEventMessage(type, sessionId, data);
   if (message && piRef && !data._batched) {
     try { appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [deliver] ${type} ${sessionId} category=${category} msg=${message.slice(0, 80)}\n`); } catch {}
-    piRef.sendUserMessage(message, { deliverAs: "steer" });
+    piRef.sendUserMessage(message, { deliverAs: "followUp" });
   }
 
   refreshDashboardWidget();
@@ -781,13 +754,21 @@ async function connectNats(retries = 2): Promise<void> {
       const messages = await consumer.consume();
       clog(`[js] consume() iterator ready`);
       (async () => {
-        // Batch: collect pending messages for 2s, then deliver as one summary
+        // Batch: collect all messages for 2s, then deliver as one coalesced summary.
+        // ACK_REQUIRED events are recorded to pendingAckEvents for the UI and acked
+        // with the rest of the batch at flush — no separate per-event steer prompt.
         let batch: Array<{ sessionId: string; eventType: string; data: Record<string, any>; msg: any }> = [];
         let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
         function flushBatch() {
           flushTimer = null;
           if (batch.length === 0) return;
+          // Record ACK_REQUIRED events into the pending UI list (ack is done below).
+          for (const e of batch) {
+            if (ACK_REQUIRED_TYPES.has(e.eventType)) {
+              recordPendingEvent(e.eventType, e.sessionId, e.data);
+            }
+          }
           if (batch.length === 1) {
             const { eventType, sessionId, data } = batch[0];
             handleAgentEvent(eventType, sessionId, data);
@@ -809,11 +790,8 @@ async function connectNats(retries = 2): Promise<void> {
           try {
             const { session: sessionId, eventType } = parseAgentSubject(msg.subject);
             const data = msg.json<Record<string, any>>();
-            if (ACK_REQUIRED_TYPES.has(eventType)) {
-              handlePendingMessage(eventType, sessionId, data, msg);
-            } else {
-              batch.push({ sessionId, eventType, data, msg });
-            }
+            // All events go through the batch for coalesced delivery.
+            batch.push({ sessionId, eventType, data, msg });
             // Reset flush timer — wait 2s for more messages before delivering
             if (flushTimer) clearTimeout(flushTimer);
             flushTimer = setTimeout(flushBatch, 2000);
@@ -921,14 +899,36 @@ async function connectNats(retries = 2): Promise<void> {
       const issueConsumer = await issueStream.getConsumer(issueConsumerName);
       (async () => {
         const messages = await issueConsumer.consume();
+        let issueBatch: Array<{ sessionId: string; eventType: string; data: Record<string, any>; msg: any }> = [];
+        let issueFlushTimer: ReturnType<typeof setTimeout> | null = null;
+        function flushIssueBatch() {
+          issueFlushTimer = null;
+          if (issueBatch.length === 0) return;
+          if (issueBatch.length === 1) {
+            const { eventType, sessionId, data } = issueBatch[0];
+            handleAgentEvent(eventType, sessionId, data);
+          } else {
+            const summary = issueBatch.map((e) => {
+              const project = e.data._project || e.sessionId;
+              return `- ${project}: ${e.eventType}`;
+            }).join("\n");
+            if (piRef) {
+              piRef.sendUserMessage(`[issue-events] ${issueBatch.length} events:\n${summary}`, { deliverAs: "followUp" });
+            }
+            issueBatch.forEach((e) => handleAgentEvent(e.eventType, e.sessionId, { ...e.data, _batched: true }));
+          }
+          issueBatch.forEach((e) => e.msg.ack());
+          issueBatch = [];
+        }
         for await (const msg of messages) {
           try {
             const parts = msg.subject.split(".");
             const eventType = parts.slice(2).join("_"); // pinard.exohub.issues.new -> issues_new
             const data = msg.json<Record<string, any>>();
             const sessionId = data.project || "issue-watcher";
-            handleAgentEvent(eventType, sessionId, { ...data, _project: data.project, cwd: "" });
-            msg.ack();
+            issueBatch.push({ sessionId, eventType, data: { ...data, _project: data.project, cwd: "" }, msg });
+            if (issueFlushTimer) clearTimeout(issueFlushTimer);
+            issueFlushTimer = setTimeout(flushIssueBatch, 2000);
           } catch { msg.ack(); }
         }
       })();
@@ -963,6 +963,33 @@ async function connectNats(retries = 2): Promise<void> {
       const schedConsumer = await schedStream.getConsumer(schedConsumerName);
       (async () => {
         const messages = await schedConsumer.consume();
+        let schedBatch: Array<{ sessionId: string; eventType: string; data: Record<string, any>; msg: any }> = [];
+        let schedFlushTimer: ReturnType<typeof setTimeout> | null = null;
+        function flushSchedBatch() {
+          schedFlushTimer = null;
+          if (schedBatch.length === 0) return;
+          // Record ACK_REQUIRED schedule events to pending UI list.
+          for (const e of schedBatch) {
+            if (ACK_REQUIRED_TYPES.has(e.eventType)) {
+              recordPendingEvent(e.eventType, e.sessionId, e.data);
+            }
+          }
+          if (schedBatch.length === 1) {
+            const { eventType, sessionId, data } = schedBatch[0];
+            handleAgentEvent(eventType, sessionId, data);
+          } else {
+            const summary = schedBatch.map((e) => {
+              const sched = e.data._scheduleName || e.sessionId;
+              return `- ${sched}: ${e.eventType}`;
+            }).join("\n");
+            if (piRef) {
+              piRef.sendUserMessage(`[schedule-events] ${schedBatch.length} events:\n${summary}`, { deliverAs: "followUp" });
+            }
+            schedBatch.forEach((e) => handleAgentEvent(e.eventType, e.sessionId, { ...e.data, _batched: true }));
+          }
+          schedBatch.forEach((e) => e.msg.ack());
+          schedBatch = [];
+        }
         for await (const msg of messages) {
           try {
             const parts = msg.subject.split(".");
@@ -972,9 +999,12 @@ async function connectNats(retries = 2): Promise<void> {
             const eventType = `schedule_${action}`;
             const data = msg.json<Record<string, any>>();
             data._scheduleName = scheduleName;
-            handlePendingMessage(eventType, scheduleName, { ...data, _project: data.project, cwd: "" }, msg);
+            schedBatch.push({ sessionId: scheduleName, eventType, data: { ...data, _project: data.project, cwd: "" }, msg });
+            if (schedFlushTimer) clearTimeout(schedFlushTimer);
+            schedFlushTimer = setTimeout(flushSchedBatch, 2000);
           } catch (e) {
-            console.error("[pinard] scheduler consumer error (not acking):", e);
+            console.error("[pinard] scheduler consumer error:", e);
+            try { msg.ack(); } catch {}
           }
         }
       })();
@@ -1059,7 +1089,6 @@ async function connectNats(retries = 2): Promise<void> {
 
     // Watch agent KV for cache updates
     startKVWatchers();
-    startInProgressHeartbeat();
   } catch (e) {
     console.error("[pinard] NATS setup failed:", e);
   }
@@ -1806,7 +1835,7 @@ const openCuveeMRTool = defineTool({
 const commentMrTool = defineTool({
   name: "comment_mr",
   label: "Comment on MR (direct a vendangeur)",
-  description: "Post a comment on a merge request to direct the vendangeur handling it. A plain pressoir comment posted by the conductor user is ignored by the vendangeur (conductor and worker share the same git host identity); this one is marked so the mr-watcher forwards it to the vendangeur as review feedback. The MR must be tracked (vendangeurs call track_mr when they open an MR). Use this for visible, auditable MR-thread direction; use send_message for out-of-band instructions.",
+  description: "Post a comment on a merge request to direct the vendangeur handling it. A plain pressoir comment posted by the conductor user is ignored by the vendangeur (conductor and worker share the same git host identity); this one is marked via `aoc comment-mr` so the mr-watcher forwards it to the vendangeur as review feedback. The MR must be tracked (vendangeurs call track_mr when they open an MR). Use this for visible, auditable MR-thread direction; use send_message for out-of-band instructions.",
   parameters: Type.Object({
     project: Type.String({ description: "Vigne/project name from vignes.yaml" }),
     mr: Type.Number({ description: "Merge request IID (number)" }),
@@ -1817,12 +1846,11 @@ const commentMrTool = defineTool({
       const { execFileSync } = require("node:child_process");
       const repo = resolveProjectRepo(params.project);
       if (!repo) return { content: [{ type: "text" as const, text: `Project "${params.project}" not found in vignes.yaml` }], details: undefined };
-      const body = `${params.body}\n\n${CONDUCTOR_MARKER}`;
       execFileSync(AOC, [
-        "pressoir", "comment-pr",
-        "--repo", repo,
-        "--number", String(params.mr),
-        "--body", body,
+        "comment-mr",
+        "--project", params.project,
+        "--mr", String(params.mr),
+        "--body", params.body,
       ], { encoding: "utf8" });
       const prLabel = resolveVigneProvider(params.project) === "github" ? `PR #${params.mr}` : `MR !${params.mr}`;
       return { content: [{ type: "text" as const, text: `Commented on ${prLabel} (${params.project}) — the vendangeur will receive it as review feedback.` }], details: undefined };
@@ -1964,6 +1992,13 @@ function buildFallbackReport(): string | null {
 // The maître NEVER approves automatically — approval is a human or forge-side act.
 // `aoc pressoir approve-pr` remains available as a manual CLI tool for operators
 // acting on explicit instruction, but is not invoked from this automatic path.
+//
+// The review MUST be posted via the `comment_mr` tool, not raw `aoc pressoir
+// comment-pr`: the conductor and vendangeur share a git-host identity, so an
+// unmarked note is silently dropped by the mr-watcher. `comment_mr` marks every
+// review — including pure LGTMs — with the conductor marker so it is always
+// forwarded to the vendangeur. This costs a harmless extra wake-up on LGTM-only
+// reviews; that's cheaper than a silently dropped change-request.
 function handleMaitreNeedsReview(data: { mr?: number; project?: string; repo?: string; url?: string; sha?: string; session?: string }): void {
   if (!IS_MAITRE) return;
   const { mr, project, repo, url, sha, session } = data;
@@ -1978,7 +2013,7 @@ Please review the changes:
 1. Use \`aoc pressoir get-pr-changes --repo ${repo} --number ${mr}\` to list changed files.
 2. Use \`aoc pressoir list-pr-notes --repo ${repo} --number ${mr}\` to read existing review comments.
 3. Read the relevant changed files to understand the impact.
-4. Post a signed review comment via \`aoc pressoir comment-pr --repo ${repo} --number ${mr} --body "<your review>\n\n🍇 Reviewed by the ${PARCELLE} maître"\`.
+4. Post your review with the \`comment_mr\` tool (project: "${project}", mr: ${mr}, body: "<your review>\n\n🍇 Reviewed by the ${PARCELLE} maître"). Always use \`comment_mr\` here, even for a plain LGTM — a plain pressoir comment is invisible to the vendangeur.
 
 Do NOT approve the MR. Approval is the human owner's or forge's responsibility.
 Be thorough but concise.`;

@@ -53,6 +53,19 @@ if ! _node_ok "$_node_ver"; then
 fi
 unset _node_ver _node_ok
 
+# Build provenance: report which commit/tag this launcher's bundle was built
+# from (written by `make dist` / `./install` — scripts/build-info.sh). Absent
+# on a plain source checkout that skipped either — degrade silently.
+if [[ -f "$PINARD_HOME/BUILD_INFO" ]]; then
+  # shellcheck disable=SC1091
+  source "$PINARD_HOME/BUILD_INFO"
+  _dirty_suffix=""
+  [[ "${DIRTY:-false}" == true ]] && _dirty_suffix=", DIRTY"
+  echo "[pinard] build: ${TAG:-unknown} / ${COMMIT_SHORT:-unknown} (built ${BUILT_AT:-unknown})${_dirty_suffix}" >&2
+  export PINARD_BUILD="${TAG:-unknown}/${COMMIT_SHORT:-unknown}"
+  unset _dirty_suffix
+fi
+
 VIGNOBLE_ROOT="${VIGNOBLE_ROOT:-$HOME}"
 
 # List all pinard tmux sessions across all vignoble sockets (format: socket:session)
@@ -244,10 +257,14 @@ PINARD_ENV="${PINARD_ENV:-$HOME/.config/pinard/env}"
 # Reads ~/.config/pinard/credentials.yaml only — no vignoble needed.
 if command -v aoc &>/dev/null; then
   eval "$(aoc env-exports)"
+  # PINARD_PROVIDER / PINARD_PROVIDER_API are emitted by env-exports from vignes.yaml.
+  # Default to proxy/anthropic-messages when no vignoble is available (standalone workers).
+  PINARD_PROVIDER="${PINARD_PROVIDER:-proxy}"
+  PINARD_PROVIDER_API="${PINARD_PROVIDER_API:-anthropic-messages}"
   # pi reads its provider registry from ~/.pi/agent/models.json. A sandboxed worker
-  # (singularity --containall) starts with an empty ~/.pi, so the proxy provider is
-  # unknown at startup and `--models proxy/<id>` resolves to nothing. Seed it from
-  # ~/.claude/settings.json before launching pi (idempotent; skips if already set).
+  # (singularity --containall) starts with an empty ~/.pi, so the provider is
+  # unknown at startup and `--models <provider>/<id>` resolves to nothing. Seed it
+  # from the configured source (idempotent; skips if already set).
   aoc ensure-proxy-provider 2>/dev/null || true
 fi
 
@@ -660,8 +677,8 @@ YAML
   fi
 
   _wait_for_engram
-  _run_with_engram_flush pi --provider proxy \
-    --models "proxy/$WORKER_MODEL" \
+  _run_with_engram_flush pi --provider "${PINARD_PROVIDER:-proxy}" \
+    --models "${PINARD_PROVIDER:-proxy}/$WORKER_MODEL" \
     "${_sess_args[@]}" \
     --extension "$PINARD_REPO/pi-extension/worker" \
     --extension "$PINARD_REPO/pi-extension/babysitter" \
@@ -726,6 +743,10 @@ _PINARD_TOOLS="read,write,edit,grep,find,ls,glob,bash,send_message,spawn_agent,c
 CONDUCTOR_MODEL="$(aoc resolve-model --role conductor 2>/dev/null)"
 _MODELS_LIST="$(aoc resolve-model --models-list 2>/dev/null)"
 export ANTHROPIC_MODEL="$CONDUCTOR_MODEL"
+# PINARD_PROVIDER / PINARD_PROVIDER_API come from env-exports (vignes.yaml);
+# fall back to proxy defaults for vignoble-less contexts.
+PINARD_PROVIDER="${PINARD_PROVIDER:-proxy}"
+PINARD_PROVIDER_API="${PINARD_PROVIDER_API:-anthropic-messages}"
 
 # Startup timing anchor (epoch ms just before launching pi). The extension logs
 # elapsed-since-this to logs/conductor.log to split pi-boot vs NATS-connect cost.
@@ -774,7 +795,7 @@ if [[ -n "$MAITRE_PARCELLE" ]]; then
   fi
   [[ "$_ENGRAM_CLOUD_ACTIVE" == 1 && -n "$STANDALONE" ]] && _engram_sync_loop $$ "$ENGRAM_PROJECT" &
   _wait_for_engram
-  _run_with_engram_flush pi --provider proxy \
+  _run_with_engram_flush pi --provider "${PINARD_PROVIDER:-proxy}" \
     --models "$_MODELS_LIST" \
     --extension "$PINARD_REPO/pi-extension/pinard" \
     --session "$_sess_dir/session.jsonl" \
@@ -868,7 +889,7 @@ mkdir -p "$VIGNOBLE/.state"
 
 [[ "$_ENGRAM_CLOUD_ACTIVE" == 1 && -n "$STANDALONE" ]] && _engram_sync_loop $$ "$ENGRAM_PROJECT" &
 _wait_for_engram
-_run_with_engram_flush pi --provider proxy \
+_run_with_engram_flush pi --provider "${PINARD_PROVIDER:-proxy}" \
   --models "$_MODELS_LIST" \
   --extension "$PINARD_REPO/pi-extension/pinard" \
   --session "$VIGNOBLE/.state/regisseur-session.jsonl" \

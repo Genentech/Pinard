@@ -23,7 +23,7 @@ describe("Contract: Batching and deduplication work together", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("single event within batch window is delivered individually", async () => {

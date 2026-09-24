@@ -245,7 +245,7 @@ memory:
   config:
     surrealUser: "root"
     engramUrl: ""
-    rosettaUrl: "https://embeddings.example.com"
+    embeddingUrl: "https://embeddings.example.com"
     natsUrl: ""
     natsUser: ""
     natsVignoble: ""
@@ -254,6 +254,8 @@ memory:
     llmAuth: "google-sa"
     llmModel: "google/gemini-3.1-flash-lite"
     llmBaseUrl: "https://aiplatform.googleapis.com/v1beta1/projects/gcp-p-germline-ovf6s/locations/global/endpoints/openapi"
+    llmTokenUrl: ""           # pour-URL for MEMORY_LLM_AUTH=url (single URL)
+    llmTokenUrls: []           # pour-URLs for round-robin (list); overrides llmTokenUrl when set
     # Engram source: 'http' (local dev, default) or 'postgres' (EKS cloud RDS direct read)
     engramSource: "http"
     # Comma-separated group_ids to ingest (optional filter/override).
@@ -290,7 +292,7 @@ memory:
     natsPasswordKey: ""  # e.g. nats_lelongs_passwd; set to add creds to NATS_URL
     engramRoDsnKey: ""   # e.g. engram_ro_dsn; set to inject ENGRAM_PG_DSN from Vault
     sshKey: ""           # e.g. ssh_github_com; overrides memory.ssh.vault.sshKey when set
-    caBundleVaultKey: "" # e.g. huge-v2/shared/roche-ca; when set, syncs the CA bundle from
+    caBundleVaultKey: "" # e.g. myorg/shared/ca-bundle; when set, syncs the CA bundle from
                           # Vault into the vault secret (key = caBundleProperty). Use with
                           # caBundle.enabled=true pointing at the vault secret.
     caBundleProperty: ca-bundle.crt  # Vault property name for the CA bundle

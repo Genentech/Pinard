@@ -4,11 +4,14 @@
 # runtime layer. Uses only public base images — no internal registry references.
 #
 # Build (from repo root):
-#   docker build -f cmd/webterm-gateway/Dockerfile -t pinard-webterm-gateway .
+#   docker build -f build/pinard-webterm-gateway/Dockerfile -t pinard-webterm-gateway .
 #
-# The combined pinard image (root Dockerfile) also includes this binary alongside
-# the memory services and static site. Use this Dockerfile when you need the
-# gateway standalone (e.g. a dedicated gateway deployment).
+# Moved from cmd/webterm-gateway/Dockerfile. The pinard-backend image
+# (build/pinard-backend/Dockerfile, formerly the repo-root Dockerfile) also
+# includes this binary alongside the memory services and static site. Use this
+# Dockerfile when you need the gateway standalone (e.g. a dedicated gateway
+# deployment). Unrelated to the root Dockerfile, which now builds the
+# agent/worker image.
 
 ARG GOLANG=golang:1.24-bookworm
 ARG DEBIAN=debian:bookworm-slim

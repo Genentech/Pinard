@@ -4,7 +4,13 @@
 
 - **Node.js 20+** and npm (for Vitest tests)
 - **Go 1.24+** (for Go unit tests)
-- **NATS 2.14+** running locally with JetStream enabled (for integration and contract tests)
+- **NATS 2.14+** running locally with JetStream enabled (for integration and contract tests).
+  `npm test` auto-starts an ephemeral `nats-server -js` on `127.0.0.1:4222` if
+  nothing is already listening there and the `nats-server` binary is on PATH
+  (see `setup/global-nats-setup.ts`); otherwise install it or point
+  `PINARD_TEST_NATS_URL` at an existing instance. Deliberately independent of
+  `PINARD_NATS_URL` (the production cluster the pinard launcher exports —
+  tests must never touch it).
 
 Install JS dependencies:
 

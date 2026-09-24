@@ -1,82 +1,121 @@
-# pinard — one image backing the website, the webterm-gateway, AND the memory
-# services, selected by `command`:
-#   webterm-gateway serve-site --dir /srv/site --addr :80   → static docs site (port 80)
-#   webterm-gateway                                          → k8s web-terminal gateway (port 8080)
-#   memory-ingester                                          → memory ingester
-#   memory-recall                                            → memory recall service
-#   memory-rollup                                            → scope roll-up engine
-#   memory-curator                                           → per-vigne wiki curator
+# pinard — the agent/worker image (vendangeur 🧺, maître, and régisseur all run
+# this same binary; the role is selected by the args passed to `pinard`, e.g.
+# `--worker --vignoble-name <v>` for a standalone/HPC-style worker).
 #
-# Built by gpapy-asg-ci `.build-image` (docker build -f Dockerfile .). Multi-stage:
-# render the Hugo docs, build all Go binaries, assemble a minimal runtime.
-# No Python runtime required — all memory services are now native Go binaries.
+# Publishes as the bare `ghcr.io/genentech/pinard` name. Equivalent to
+# `dist/singularity/pinard-base.def` + `dist/singularity/pinard-os.def`
+# combined into a single Docker multi-stage build — same base OS
+# (`docker://rockylinux:9`, which the SIF chain already bootstraps from), same
+# `make dist` bundle, same engram version, same env, same uncork bootstrap.
+# Keep the two in lockstep: engram version (below, must match
+# `.engram-version`), PINARD_HOME/PATH, and the uncork bootstrap logic. Does
+# NOT replicate the SIF's SLURM/`sbatch` preflight — that's HPC-specific and
+# must not fail a k8s/OSS container.
+#
+# No secrets, no internal-only CA, and no internal-only defaults (e.g. a
+# corporate LLM proxy URL) are baked in — this image is published publicly.
+# An internal CA can be layered in at build time via EXTRA_CA_DEB_URL, same
+# opt-in pattern as build/pinard-backend/Dockerfile.
+#
+# Build (from repo root): docker build -t pinard .
+# Run:    docker run --rm -e PINARD_UNCORK_URL=... -e PINARD_POUR_URL=... \
+#           pinard --worker --vignoble-name <v> --model <id> ...
 
 ARG DEBIAN=debian:bookworm-slim
 ARG GOLANG=golang:1.24-bookworm
 ARG TARGETARCH
 
-# ── Stage 1: render the Hugo site ────────────────
-FROM --platform=$BUILDPLATFORM ${DEBIAN} AS site
-ARG HUGO_VERSION=0.148.1
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates wget git gcc g++ libc-dev && \
-    wget -q https://go.dev/dl/go1.24.7.linux-amd64.tar.gz && \
-        tar xzf go1.24.7.linux-amd64.tar.gz -C /usr/local && rm go1.24.7.linux-amd64.tar.gz && \
-    wget -q https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz && \
-        tar xzf hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz -C /usr/local/bin && \
-        rm hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz && \
-    rm -rf /var/lib/apt/lists/*
+# ── Stage 1: build the `make dist` bundle (aoc + launcher + extensions + a
+# vendored Node/Pi runtime), reproducibly and version-pinned — NOT from
+# whatever Node/npm happen to be ambient on the builder, which is `dist/build.sh`'s
+# documented main risk when run outside CI. No --platform=$BUILDPLATFORM here:
+# this stage npm-installs native addons (e.g. better-sqlite3) and vendors the
+# node binary itself, both of which must match the TARGET architecture, so it
+# runs emulated (via buildx/QEMU) for non-native platforms rather than
+# cross-compiling.
+FROM node:22-bookworm AS dist-builder
+# Go toolchain, copied from the pinned golang image rather than apt (bookworm's
+# packaged compiler doesn't satisfy `go 1.24.7` in go.mod). Resolves to the
+# same target architecture as this stage under a multi-platform buildx build.
+COPY --from=golang:1.24-bookworm /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
-WORKDIR /src
-COPY website/ ./website/
-RUN cd website && hugo --minify --destination /out/site
-
-# ── Stage 2: build all Go binaries ───────────────
-FROM --platform=$BUILDPLATFORM ${GOLANG} AS build
-ARG TARGETARCH
-WORKDIR /src
-COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-        go build -trimpath -ldflags="-s -w" -o /out/webterm-gateway ./cmd/webterm-gateway && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-        go build -trimpath -ldflags="-s -w" -o /out/memory-ingester ./cmd/memory-ingester && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-        go build -trimpath -ldflags="-s -w" -o /out/memory-recall    ./cmd/memory-recall && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-        go build -trimpath -ldflags="-s -w" -o /out/memory-rollup    ./cmd/memory-rollup && \
-    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} \
-        go build -trimpath -ldflags="-s -w" -o /out/memory-curator   ./cmd/memory-curator
-
-# ── Stage 3: minimal runtime ──────────────────────
-FROM ${DEBIAN}
-# ROCHE_CA_DEB_URL: when set, download and install the corporate internal CA .deb
-# so the pod can reach intranet TLS (Rosetta, cloud Engram). Set in internal CI
-# builds only; public/OSS builds leave this empty and rely on the Helm-mounted
-# CA bundle (memory.caBundle) instead. No intranet URL appears in this file.
-ARG ROCHE_CA_DEB_URL=""
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates git openssh-client wget \
-    && if [ -n "$ROCHE_CA_DEB_URL" ]; then \
-         wget -q "$ROCHE_CA_DEB_URL" -O roche-ca-certificates.deb \
-         && dpkg -i roche-ca-certificates.deb \
-         && rm -f roche-ca-certificates.deb \
-         && update-ca-certificates; \
-    fi \
-    && apt-get purge -y wget && apt-get autoremove -y \
+        git ca-certificates python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /out/webterm-gateway   /usr/local/bin/webterm-gateway
-COPY --from=build /out/memory-ingester   /usr/local/bin/memory-ingester
-COPY --from=build /out/memory-recall     /usr/local/bin/memory-recall
-COPY --from=build /out/memory-rollup     /usr/local/bin/memory-rollup
-COPY --from=build /out/memory-curator    /usr/local/bin/memory-curator
-COPY --from=site  /out/site              /srv/site
-# Entrypoint script: if EXTRA_CA_CERTS points to a mounted CA bundle, append it
-# to the system trust store before starting the main process.
-RUN printf '#!/bin/sh\nset -e\nif [ -n "$EXTRA_CA_CERTS" ] && [ -f "$EXTRA_CA_CERTS" ]; then\n    cat "$EXTRA_CA_CERTS" >> /etc/ssl/certs/ca-certificates.crt\nfi\nexec "$@"\n' > /usr/local/bin/docker-entrypoint.sh \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh
-WORKDIR /app
-EXPOSE 80 8080
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh", "webterm-gateway"]
+WORKDIR /src
+COPY . .
+ENV NODE_BIN=/usr/local/bin/node
+RUN bash dist/build.sh
+
+# ── Stage 2: runtime (Rocky Linux 9, matching the SIF chain) ─────────────────
+FROM rockylinux:9 AS runtime
+# Re-declare: ARGs declared before the first FROM are global-scope only and do
+# NOT automatically propagate into a build stage — each stage that needs
+# TARGETARCH (a buildx-populated automatic ARG) must redeclare it.
+ARG TARGETARCH
+
+# Optional corporate CA .deb (unpacked with `ar`/`tar`, same format as the
+# SIF's internal CA and build/pinard-backend/Dockerfile's EXTRA_CA_DEB_URL).
+# Empty by default — the published OSS image trusts only the public CA set.
+ARG EXTRA_CA_DEB_URL=""
+RUN set -eux; \
+    dnf -y install epel-release; \
+    dnf -y install git wget tar gzip which procps-ng glibc ca-certificates; \
+    if [ -n "$EXTRA_CA_DEB_URL" ]; then \
+        dnf -y install binutils xz; \
+        wget -q -O /tmp/extra-ca.deb "$EXTRA_CA_DEB_URL"; \
+        ( cd /tmp && ar p extra-ca.deb data.tar.xz | tar xJ ./usr/share/ca-certificates ); \
+        find /tmp/usr/share/ca-certificates -name '*.crt' -exec cp {} /etc/pki/ca-trust/source/anchors/ \; ; \
+        update-ca-trust; \
+        rm -rf /tmp/extra-ca.deb /tmp/usr; \
+    fi; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf
+
+# engram — statically linked binary required for mem_* tools (mem_save,
+# mem_search, …). A sandboxed/standalone worker has no daemon to serve it, so
+# it self-serves. ENGRAM_VERSION must stay in lockstep with .engram-version
+# at the repo root and dist/singularity/pinard-base.def (both 1.16.1 today).
+ARG ENGRAM_VERSION=1.16.1
+RUN curl -fsSL \
+      "https://github.com/Gentleman-Programming/engram/releases/download/v${ENGRAM_VERSION}/engram_${ENGRAM_VERSION}_linux_${TARGETARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin engram \
+    && chmod +x /usr/local/bin/engram \
+    && /usr/local/bin/engram --version
+
+# Extract the makeself bundle. PINARD_HOME/HOME/TMPDIR are redirected the same
+# way as the SIF %post (the ~800M payload doesn't fit in a small /tmp).
+COPY --from=dist-builder /src/dist/pinard-linux-x64.run /opt/pinard-linux-x64.run
+RUN set -eux; \
+    mkdir -p /opt/pinard-home /opt/build-home /opt/extract-tmp; \
+    chmod +x /opt/pinard-linux-x64.run; \
+    PINARD_HOME=/opt/pinard-home HOME=/opt/build-home TMPDIR=/opt/extract-tmp \
+        /opt/pinard-linux-x64.run; \
+    rm -rf /opt/extract-tmp /opt/build-home /opt/pinard-linux-x64.run; \
+    chmod -R a+rX /opt/pinard-home; \
+    ln -sf /opt/pinard-home/bin/pinard /usr/local/bin/pinard; \
+    ln -sf /opt/pinard-home/bin/aoc /usr/local/bin/aoc; \
+    ln -sf /opt/pinard-home/bin/pinard-picker /usr/local/bin/pinard-picker
+
+ENV PINARD_HOME=/opt/pinard-home
+ENV PATH=/opt/pinard-home/runtime/bin:/usr/local/bin:$PATH
+
+# Provenance: recorded as OCI labels and in $PINARD_HOME/BUILD_INFO, so a
+# booted worker can report its build (surfaced in the pinard-agents KV record
+# like the SIF). See #302 for the equivalent pattern on other images.
+ARG GIT_REVISION=unknown
+ARG VERSION=dev
+ARG BUILT_AT=unknown
+LABEL org.opencontainers.image.revision="${GIT_REVISION}" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.created="${BUILT_AT}" \
+      org.opencontainers.image.source="https://github.com/genentech/pinard"
+RUN printf 'revision=%s\nversion=%s\nbuilt_at=%s\n' "$GIT_REVISION" "$VERSION" "$BUILT_AT" \
+      > "$PINARD_HOME/BUILD_INFO"
+
+COPY build/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+WORKDIR /opt/pinard-home
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD []

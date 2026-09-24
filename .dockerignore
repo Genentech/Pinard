@@ -1,4 +1,8 @@
-# Keep the build context lean (root Dockerfile builds hugo + gateway).
+# Shared build context for all root-context Dockerfiles (root Dockerfile =
+# agent/worker, build/pinard-backend, build/pinard-solo, build/pinard-webterm-gateway
+# all build with context "."). Keep it lean but wide enough for the worker
+# image's `dist/build.sh` run (needs bin/, dist/build.sh + dist/.makeself,
+# deps/babysitter, lib/, pi-extension/, themes/, processes/, scripts/).
 .git
 .worktrees
 node_modules
@@ -6,11 +10,10 @@ node_modules
 website/public
 website/resources
 website/.hugo_build.lock
-dist
+dist/pinard-linux-x64.run
+dist/singularity
+dist/stage
 releases
-lib
-bin
-deps
 tests
 charts
 docs

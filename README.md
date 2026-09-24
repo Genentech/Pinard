@@ -146,22 +146,38 @@ paths and exact prerequisites.
 Pre-built images are published to GitHub Container Registry on every release.
 No credentials are needed to pull public images.
 
-> **Note on `aoc`:** the `aoc` CLI and daemon run on your control host (laptop,
-> workstation, or CI runner) — not inside a container. Install them from the
-> source checkout or a Linux release bundle (see step 1). The images below are
-> for the **k8s-hosted services** only.
+> **Note on `aoc`:** for a host install, the `aoc` CLI and daemon run on your
+> control host (laptop, workstation, or CI runner) — not inside a container;
+> install them from the source checkout or a Linux release bundle (see step 1).
+> The `pinard` image below is the exception — it bundles `aoc` and the full
+> agent runtime for running a worker (or a régisseur/maître) without a host
+> install (e.g. on k8s or an HPC node).
 
 | Image | Contents | Use |
 |---|---|---|
-| `ghcr.io/genentech/pinard` | webterm-gateway + memory services + static docs site | k8s deployment of the Pinard backend services |
+| `ghcr.io/genentech/pinard` | agent/worker: vendored Node/Pi runtime, `aoc`, `engram` | run a vendangeur (worker), régisseur, or maître in a container; role selected by the args passed to `pinard` |
+| `ghcr.io/genentech/pinard-backend` | webterm-gateway + memory services + static docs site | k8s deployment of the Pinard backend services |
 | `ghcr.io/genentech/pinard-webterm-gateway` | standalone web-terminal gateway only | lighter k8s deployment when memory services run elsewhere |
 
 ```bash
-# k8s services image (webterm-gateway + memory services + static docs site)
+# Agent/worker image (vendangeur/régisseur/maître)
 docker pull ghcr.io/genentech/pinard:latest
+
+# k8s backend services image (webterm-gateway + memory services + static docs site)
+docker pull ghcr.io/genentech/pinard-backend:latest
 
 # Standalone web-terminal gateway
 docker pull ghcr.io/genentech/pinard-webterm-gateway:latest
+```
+
+Run a standalone/HPC-style worker:
+
+```bash
+docker run --rm \
+  -e PINARD_UNCORK_URL=… \
+  -e PINARD_POUR_URL=… \
+  ghcr.io/genentech/pinard:latest \
+  --worker --vignoble-name myproject --model claude-sonnet-4-6
 ```
 
 Run the standalone web-terminal gateway:
@@ -176,8 +192,10 @@ docker run --rm \
 ```
 
 > **Engram**: the memory backend ([Gentleman-Programming/engram](https://github.com/Gentleman-Programming/engram))
-> is a third-party binary not bundled in the Genentech images. Install it from
-> the upstream release page and run it separately, or mount it into the container.
+> is a third-party binary. It is bundled in the `pinard` (agent/worker) image
+> (a sandboxed worker has no daemon to serve it, so it self-serves), but NOT in
+> `pinard-backend`/`pinard-webterm-gateway` — install it separately from the
+> upstream release page for those, or mount it into the container.
 
 ### 3. Configure credentials
 

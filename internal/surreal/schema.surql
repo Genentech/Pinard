@@ -234,6 +234,15 @@ DEFINE FIELD IF NOT EXISTS created_at ON wiki_mentions TYPE datetime DEFAULT tim
 -- run matches zero rows and is a no-op.
 UPDATE entity SET manual_edit = false WHERE manual_edit = NONE;
 
+-- Backfill wiki_doc.type from frontmatter.type for rows written before
+-- UpsertWikiDoc started mirroring it into the top-level field (#265). Without
+-- this, role-scoped dedup queries (FindSimilarWikiDoc, FindWikiDocByTitle)
+-- silently match nothing against every pre-existing doc — dedup goes blind
+-- instead of collapsing the reported duplicates. Idempotent: a second run
+-- matches zero rows once backfilled.
+UPDATE wiki_doc SET type = frontmatter.type
+  WHERE (type = "" OR type = NONE) AND frontmatter.type != NONE;
+
 -- ─── Ingest statistics ─────────────────────────────────────────────────────────
 -- Per-source ingestion counters updated at the end of each ingest cycle.
 DEFINE TABLE IF NOT EXISTS ingest_stats SCHEMAFULL;

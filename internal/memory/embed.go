@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -22,12 +23,13 @@ type EmbeddingError struct {
 
 func (e *EmbeddingError) Error() string { return "embed: " + e.Message }
 
-// Embedder wraps the Rosetta HTTP embedding endpoint.
+// Embedder wraps an HTTP embedding endpoint.
 //
 // Environment variables:
 //
-//	ROSETTA_URL   — base URL (default: https://embeddings.example.com)
-//	ROSETTA_MODEL — model name (default: qwen3-emb-0.6b)
+//	EMBEDDING_URL   — base URL (default: https://embeddings.example.com)
+//	ROSETTA_URL     — deprecated alias for EMBEDDING_URL (honored for one release)
+//	ROSETTA_MODEL   — model name (default: qwen3-emb-0.6b)
 type Embedder struct {
 	URL   string
 	Model string
@@ -36,8 +38,18 @@ type Embedder struct {
 
 // NewEmbedder creates an Embedder using environment defaults.
 func NewEmbedder() *Embedder {
+	embURL := os.Getenv("EMBEDDING_URL")
+	if embURL == "" {
+		if legacy := os.Getenv("ROSETTA_URL"); legacy != "" {
+			log.Printf("[deprecation] ROSETTA_URL is deprecated; use EMBEDDING_URL instead")
+			embURL = legacy
+		}
+	}
+	if embURL == "" {
+		embURL = "https://embeddings.example.com"
+	}
 	return &Embedder{
-		URL:   strings.TrimRight(envOr("ROSETTA_URL", "https://embeddings.example.com"), "/"),
+		URL:   strings.TrimRight(embURL, "/"),
 		Model: envOr("ROSETTA_MODEL", "qwen3-emb-0.6b"),
 		hc:    &http.Client{Timeout: 30 * time.Second},
 	}
@@ -106,5 +118,4 @@ func (e *Embedder) EmbedBatch(texts []string) ([][]float64, error) {
 	return out, nil
 }
 
-// Embedder satisfies os.Getenv via the package-level envOr helper.
-var _ = os.Getenv // suppress unused import lint
+

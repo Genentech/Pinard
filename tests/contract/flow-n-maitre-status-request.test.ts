@@ -18,7 +18,7 @@ if (!globalThis.WebSocket) (globalThis as any).WebSocket = WebSocket;
  * Mirrors the logic in index.ts without running the full Pi extension.
  */
 
-const NATS_URL = process.env.PINARD_NATS_URL || "127.0.0.1:4222";
+const NATS_URL = process.env.PINARD_TEST_NATS_URL || "127.0.0.1:4222";
 const TIMEOUT_MS = 5_000; // short timeout for tests (production uses 35s)
 
 function natsConnect(opts: any) {

@@ -113,8 +113,32 @@ type ModelConfig struct {
 }
 
 type ModelsConfig struct {
+	Provider  string      `yaml:"provider,omitempty"` // LLM provider name: "proxy" (default) | "openai" | "deepseek" | …
+	API       string      `yaml:"api,omitempty"`      // pi provider API type: "anthropic-messages" (default) | "openai-responses" | …
 	Conductor ModelConfig `yaml:"conductor,omitempty"`
 	Worker    ModelConfig `yaml:"worker,omitempty"`
+}
+
+// ProviderName returns the normalised LLM provider name, defaulting to "proxy".
+func (m ModelsConfig) ProviderName() string {
+	if m.Provider != "" {
+		return m.Provider
+	}
+	return "proxy"
+}
+
+// APIType returns the pi provider API type, defaulting to "anthropic-messages" for the
+// proxy provider and "openai-responses" for openai/deepseek.
+func (m ModelsConfig) APIType() string {
+	if m.API != "" {
+		return m.API
+	}
+	switch m.ProviderName() {
+	case "openai", "deepseek":
+		return "openai-responses"
+	default:
+		return "anthropic-messages"
+	}
 }
 
 type VignobleConfig struct {

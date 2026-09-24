@@ -145,3 +145,207 @@ func TestEnvExportsEmitsEngramPortAndURL(t *testing.T) {
 		t.Errorf("ENGRAM_PORT %d out of expected range 7500–8499", wantPort)
 	}
 }
+
+
+// TestModelsConfigDefaults verifies backward-compatibility: empty ModelsConfig
+// resolves to the proxy provider with the anthropic-messages API type.
+func TestModelsConfigDefaults(t *testing.T) {
+	var m config.ModelsConfig
+	if got := m.ProviderName(); got != "proxy" {
+		t.Errorf("empty ModelsConfig.ProviderName() = %q, want %q", got, "proxy")
+	}
+	if got := m.APIType(); got != "anthropic-messages" {
+		t.Errorf("empty ModelsConfig.APIType() = %q, want %q", got, "anthropic-messages")
+	}
+}
+
+// TestModelsConfigProviderName verifies provider name resolution for various
+// configurations, including defaults and explicit overrides.
+func TestModelsConfigProviderName(t *testing.T) {
+	cases := []struct {
+		name         string
+		provider     string
+		api          string
+		wantProvider string
+		wantAPI      string
+	}{
+		{
+			name:         "empty defaults to proxy/anthropic-messages",
+			provider:     "",
+			api:          "",
+			wantProvider: "proxy",
+			wantAPI:      "anthropic-messages",
+		},
+		{
+			name:         "explicit proxy keeps anthropic-messages default",
+			provider:     "proxy",
+			api:          "",
+			wantProvider: "proxy",
+			wantAPI:      "anthropic-messages",
+		},
+		{
+			name:         "openai defaults to openai-responses",
+			provider:     "openai",
+			api:          "",
+			wantProvider: "openai",
+			wantAPI:      "openai-responses",
+		},
+		{
+			name:         "deepseek defaults to openai-responses",
+			provider:     "deepseek",
+			api:          "",
+			wantProvider: "deepseek",
+			wantAPI:      "openai-responses",
+		},
+		{
+			name:         "explicit api overrides default",
+			provider:     "openai",
+			api:          "openai-chat",
+			wantProvider: "openai",
+			wantAPI:      "openai-chat",
+		},
+		{
+			name:         "proxy with explicit api overrides default",
+			provider:     "proxy",
+			api:          "openai-responses",
+			wantProvider: "proxy",
+			wantAPI:      "openai-responses",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := config.ModelsConfig{Provider: tc.provider, API: tc.api}
+			if got := m.ProviderName(); got != tc.wantProvider {
+				t.Errorf("ProviderName() = %q, want %q", got, tc.wantProvider)
+			}
+			if got := m.APIType(); got != tc.wantAPI {
+				t.Errorf("APIType() = %q, want %q", got, tc.wantAPI)
+			}
+		})
+	}
+}
+
+// TestResolveModelModelsListProviderPrefix verifies that the models list
+// prefixes IDs with the configured provider (not a hardcoded "proxy/").
+func TestResolveModelModelsListProviderPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	vbDir := tmpDir + "/vignoble-testprovider"
+	if err := os.MkdirAll(vbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("openai provider models list uses openai/ prefix", func(t *testing.T) {
+		vignesPath := vbDir + "/vignes.yaml"
+		content := "gitlab_host: gitlab.example.com\nmodels:\n  provider: openai\n  conductor:\n    id: gpt-4o\n  worker:\n    id: gpt-4o-mini\n"
+		if err := os.WriteFile(vignesPath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AOC_CONFIG", vignesPath)
+
+		vb, err := config.ResolveVignoble()
+		if err != nil {
+			t.Fatalf("ResolveVignoble: %v", err)
+		}
+		provider := vb.Config.Models.ProviderName()
+		if provider != "openai" {
+			t.Fatalf("ProviderName() = %q, want openai", provider)
+		}
+
+		// Simulate the --models-list logic for a non-proxy provider.
+		seen := map[string]bool{}
+		var parts []string
+		for _, id := range []string{vb.Config.Models.Conductor.ID, vb.Config.Models.Worker.ID} {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				parts = append(parts, provider+"/"+id)
+			}
+		}
+		list := strings.Join(parts, ",")
+		if !strings.Contains(list, "openai/gpt-4o") {
+			t.Errorf("models list %q must contain openai/gpt-4o", list)
+		}
+		if !strings.Contains(list, "openai/gpt-4o-mini") {
+			t.Errorf("models list %q must contain openai/gpt-4o-mini", list)
+		}
+		if strings.Contains(list, "proxy/") {
+			t.Errorf("models list %q must not use proxy/ prefix for openai", list)
+		}
+	})
+
+	t.Run("deepseek provider models list uses deepseek/ prefix", func(t *testing.T) {
+		vignesPath := vbDir + "/vignes-deepseek.yaml"
+		content := "gitlab_host: gitlab.example.com\nmodels:\n  provider: deepseek\n  conductor:\n    id: deepseek-reasoner\n  worker:\n    id: deepseek-chat\n"
+		if err := os.WriteFile(vignesPath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("AOC_CONFIG", vignesPath)
+
+		vb, err := config.ResolveVignoble()
+		if err != nil {
+			t.Fatalf("ResolveVignoble: %v", err)
+		}
+		provider := vb.Config.Models.ProviderName()
+		if provider != "deepseek" {
+			t.Fatalf("ProviderName() = %q, want deepseek", provider)
+		}
+
+		seen := map[string]bool{}
+		var parts []string
+		for _, id := range []string{vb.Config.Models.Conductor.ID, vb.Config.Models.Worker.ID} {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				parts = append(parts, provider+"/"+id)
+			}
+		}
+		list := strings.Join(parts, ",")
+		if !strings.Contains(list, "deepseek/deepseek-reasoner") {
+			t.Errorf("models list %q must contain deepseek/deepseek-reasoner", list)
+		}
+		if !strings.Contains(list, "deepseek/deepseek-chat") {
+			t.Errorf("models list %q must contain deepseek/deepseek-chat", list)
+		}
+	})
+}
+
+// TestEnvExportsEmitsPINARD_PROVIDER verifies that env-exports emits
+// PINARD_PROVIDER and PINARD_PROVIDER_API from vignes.yaml.
+func TestEnvExportsEmitsPINARDPROVIDER(t *testing.T) {
+	tmpDir := t.TempDir()
+	vbDir := tmpDir + "/vignoble-prov-export"
+	if err := os.MkdirAll(vbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	vignesPath := vbDir + "/vignes.yaml"
+	content := "gitlab_host: gitlab.example.com\nmodels:\n  provider: openai\n  api: openai-responses\n"
+	if err := os.WriteFile(vignesPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	credsPath := tmpDir + "/credentials.yaml"
+	if err := os.WriteFile(credsPath, []byte("gitlab:\n  host: gitlab.example.com\n  user: bot\nnats:\n  url: wss://nats.example.com\n  user: u\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AOC_CONFIG", vignesPath)
+	t.Setenv("PINARD_CREDENTIALS", credsPath)
+
+	vb, err := config.ResolveVignoble()
+	if err != nil {
+		t.Fatalf("ResolveVignoble: %v", err)
+	}
+
+	var lines []string
+	emit := func(k, v string) {
+		if v != "" {
+			lines = append(lines, fmt.Sprintf("export %s=%s", k, shquote(v)))
+		}
+	}
+	emit("PINARD_PROVIDER", vb.Config.Models.ProviderName())
+	emit("PINARD_PROVIDER_API", vb.Config.Models.APIType())
+
+	out := strings.Join(lines, "\n")
+	if !strings.Contains(out, "PINARD_PROVIDER='openai'") {
+		t.Errorf("env-exports output missing PINARD_PROVIDER=openai; got:\n%s", out)
+	}
+	if !strings.Contains(out, "PINARD_PROVIDER_API='openai-responses'") {
+		t.Errorf("env-exports output missing PINARD_PROVIDER_API=openai-responses; got:\n%s", out)
+	}
+}

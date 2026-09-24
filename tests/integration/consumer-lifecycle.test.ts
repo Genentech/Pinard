@@ -9,7 +9,7 @@ describe("JetStream consumer lifecycle", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("creates a durable consumer and receives messages", async () => {

@@ -1,24 +1,35 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execSync } from "node:child_process";
 
 /**
- * Behavioral permission tests that verify the worker-policy
- * actually denies commands by testing the same wildcard matching
- * logic that pi-permission-system uses.
+ * Behavioral permission tests that verify the worker-policy actually isolates
+ * a worker to its worktree.
  *
- * These tests:
- * 1. Load the actual worker-policy file
- * 2. Apply the same regex compilation as pi-permission-system
- * 3. Verify that dangerous commands are denied and safe ones allowed
- * 4. Test external_directory enforcement via a real pi process (local only)
+ * Current model (pi-permission-system, see CLAUDE.md "Permissions"): bash
+ * execution itself is UNRESTRICTED for both conductor and worker
+ * (`defaultPolicy.bash: "allow"`, no per-pattern bash deny-list) — isolation
+ * is enforced entirely by the `external_directory` special permission, which
+ * blocks path-bearing tools (Read/Write/Edit/Grep/Glob/Ls — anything with a
+ * `path`/`file_path` input) from resolving outside `cwd`. The worker policy
+ * sets `external_directory: deny`; the conductor's global policy sets
+ * `external_directory: allow` (it needs to reach arbitrary project dirs).
+ *
+ * An older iteration of this policy (see git history) used a per-pattern
+ * `bash: { "<glob>": "allow"|"deny" }` map to deny specific commands
+ * (`find /outside/*`, `cat ~/*`, …). That scheme was replaced by the simpler
+ * external_directory model (commit 7910086, "feat: use pi-permission-system
+ * for directory restrictions") but is still supported if a deployment's
+ * worker-policy sets `bash` to an object instead of the string `"allow"` — so
+ * this file exercises both shapes.
  *
  * Run: cd tests && npx vitest run integration/worker-permissions.test.ts
  */
 
 const WORKER_POLICY_PATH = join(homedir(), ".pi/agent/worker-policy/pi-permissions.jsonc");
+const GLOBAL_POLICY_PATH = join(homedir(), ".pi/agent/pi-permissions.jsonc");
 
 function parseJsonc(text: string): any {
   return JSON.parse(text.replace(/\/\/.*$/gm, "").replace(/,\s*([\]}])/g, "$1"));
@@ -33,6 +44,7 @@ function compilePattern(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
+// Only meaningful when bashRules is the (legacy) per-pattern object form.
 function matchCommand(bashRules: Record<string, string>, command: string): string | null {
   // pi-permission-system matches last-to-first (last match wins)
   const entries = Object.entries(bashRules);
@@ -46,33 +58,61 @@ function matchCommand(bashRules: Record<string, string>, command: string): strin
 }
 
 describe.skipIf(!existsSync(WORKER_POLICY_PATH))("Worker permissions (behavioral)", () => {
-  let policy: any;
+  // Loaded synchronously (not in beforeAll) so the `hasPatternBashRules`
+  // shape-detection is available at collection time for describe.skipIf below
+  // — vitest evaluates skipIf conditions when describe blocks are collected,
+  // before any hooks run.
+  //
+  // NOTE: describe.skipIf(condition) only skips executing the nested `it()`
+  // bodies — the outer describe callback itself always runs during test
+  // collection (needed to register the skipped tests for reporting). So this
+  // load must not throw even when the outer skipIf condition is true (e.g. a
+  // CI runner with no worker-policy file at all) — guard on existsSync again.
+  const policyExists = existsSync(WORKER_POLICY_PATH);
+  const policy: any = policyExists ? parseJsonc(readFileSync(WORKER_POLICY_PATH, "utf8")) : {};
+  const hasPatternBashRules = policyExists && typeof policy.bash === "object" && policy.bash !== null;
 
-  beforeAll(() => {
-    policy = parseJsonc(readFileSync(WORKER_POLICY_PATH, "utf8"));
+  describe("Current model — bash unrestricted, isolation via external_directory", () => {
+    it("worker defaultPolicy.bash is 'allow' (bash execution is not pattern-restricted)", () => {
+      expect(policy.defaultPolicy.bash).toBe("allow");
+    });
+
+    it("worker special.external_directory is 'deny' (blocks path-bearing tools outside cwd)", () => {
+      expect(policy.special.external_directory).toBe("deny");
+    });
+
+    it("conductor global policy allows external_directory (needs project-wide access)", () => {
+      if (!existsSync(GLOBAL_POLICY_PATH)) return;
+      const conductorPolicy = parseJsonc(readFileSync(GLOBAL_POLICY_PATH, "utf8"));
+      expect(conductorPolicy.defaultPolicy.bash).toBe("allow");
+      expect(conductorPolicy.special.external_directory).not.toBe("deny");
+    });
+
+    it("worker isolation boundary differs from conductor's (external_directory: deny vs allow)", () => {
+      if (!existsSync(GLOBAL_POLICY_PATH)) return;
+      const conductorPolicy = parseJsonc(readFileSync(GLOBAL_POLICY_PATH, "utf8"));
+      expect(policy.special.external_directory).toBe("deny");
+      expect(conductorPolicy.special.external_directory).not.toBe("deny");
+    });
   });
 
-  describe("Bash deny patterns — commands that MUST be denied", () => {
+  // Legacy per-pattern bash deny-list — only exercised when a deployment's
+  // worker-policy still sets `bash` to an object (see file header).
+  describe.skipIf(!hasPatternBashRules)("Bash deny patterns — commands that MUST be denied", () => {
     const deniedCommands = [
-      // Real commands observed from misbehaving workers
       'find /data/home/lelongs -path "*/gpapy-asg-ci*" -type d 2>/dev/null | head -5',
       "cd ~/gpapy-asg-ci && git show 4acbef4",
       "cd ~/gpapy-asg-ci && git branch -a | head -20",
-      // find with absolute paths
       "find /data/home/lelongs -name foo",
       "find /home/user -type d",
       "find ~/projects -name test",
-      // compound commands with find
       "cd /tmp && find /data/home -path '*gpapy*'",
       "echo hi && find /data/home/lelongs -type f | head",
       "find /data -name '*.py' 2>/dev/null",
-      // cd to external dirs
       "cd /data/home/other",
       "cd ~/other-project",
-      // ls on external paths
       "ls /data/home/lelongs/other-project",
       "ls ~/other-project",
-      // cat on external files
       "cat ~/somefile.txt",
       "cat /data/home/lelongs/.bashrc",
     ];
@@ -85,7 +125,7 @@ describe.skipIf(!existsSync(WORKER_POLICY_PATH))("Worker permissions (behavioral
     }
   });
 
-  describe("Bash allow — commands that MUST be allowed", () => {
+  describe.skipIf(!hasPatternBashRules)("Bash allow — commands that MUST be allowed", () => {
     const allowedCommands = [
       "find . -name '*.py'",
       "find src -type f",
@@ -116,9 +156,7 @@ describe.skipIf(!existsSync(WORKER_POLICY_PATH))("Worker permissions (behavioral
     });
   });
 
-  describe("Conductor policy — bash MUST allow everything", () => {
-    const GLOBAL_POLICY_PATH = join(homedir(), ".pi/agent/pi-permissions.jsonc");
-
+  describe.skipIf(!hasPatternBashRules)("Conductor policy — bash MUST allow everything", () => {
     it("conductor global policy allows all bash", () => {
       if (!existsSync(GLOBAL_POLICY_PATH)) return;
       const conductorPolicy = parseJsonc(readFileSync(GLOBAL_POLICY_PATH, "utf8"));

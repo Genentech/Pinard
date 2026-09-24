@@ -120,13 +120,13 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	for {
-		groupIDs, err := discoverGroupIDs()
+		groups, err := discoverGroups()
 		if err != nil {
-			log.Printf("ERROR: discover group_ids: %v", err)
+			log.Printf("ERROR: discover groups: %v", err)
 		} else {
-			for _, gid := range groupIDs {
-				if err := curateGroup(gid, emb, llm); err != nil {
-					log.Printf("ERROR: curate %s: %v", gid, err)
+			for _, g := range groups {
+				if err := curateGroup(g.id, g.vignobleCloneDir, emb, llm); err != nil {
+					log.Printf("ERROR: curate %s: %v", g.id, err)
 				}
 			}
 		}
@@ -142,6 +142,14 @@ func run(cmd *cobra.Command, args []string) error {
 
 type vignesYAML struct {
 	Vignes map[string]struct{} `yaml:"vignes"`
+}
+
+// groupInfo pairs a group/vigne ID with the vignoble clone root that owns it.
+// wikiDir = vignobleCloneDir/wiki/<id> is where files are written.
+// Git operations run at vignobleCloneDir (the actual git repo root).
+type groupInfo struct {
+	id               string
+	vignobleCloneDir string
 }
 
 func loadGroupIDs(path string) ([]string, error) {
@@ -161,18 +169,24 @@ func loadGroupIDs(path string) ([]string, error) {
 	return ids, nil
 }
 
-func discoverGroupIDs() ([]string, error) {
+// discoverGroups returns all (groupID, vignobleCloneDir) pairs.
+// When VIGNOBLES_BASE_DIR is set each subdirectory is a vignoble clone; groups
+// are derived from that clone's vignes.yaml and their vignobleCloneDir is the
+// clone root. When only VIGNOBLE_DIR (or VIGNOBLE_YAML) is set there is a
+// single vignoble whose clone root IS that directory.
+func discoverGroups() ([]groupInfo, error) {
 	if baseDir := os.Getenv("VIGNOBLES_BASE_DIR"); baseDir != "" {
 		entries, err := os.ReadDir(baseDir)
 		if err != nil {
 			return nil, fmt.Errorf("read VIGNOBLES_BASE_DIR %s: %w", baseDir, err)
 		}
-		var ids []string
+		var groups []groupInfo
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
 			}
-			vigPath := filepath.Join(baseDir, e.Name(), "vignes.yaml")
+			cloneDir := filepath.Join(baseDir, e.Name())
+			vigPath := filepath.Join(cloneDir, "vignes.yaml")
 			if _, err := os.Stat(vigPath); os.IsNotExist(err) {
 				continue
 			}
@@ -181,29 +195,43 @@ func discoverGroupIDs() ([]string, error) {
 				log.Printf("WARN: load %s: %v", vigPath, err)
 				continue
 			}
-			ids = append(ids, gids...)
+			for _, gid := range gids {
+				groups = append(groups, groupInfo{id: gid, vignobleCloneDir: cloneDir})
+			}
 		}
-		return ids, nil
+		return groups, nil
 	}
 	vigPath := os.Getenv("VIGNOBLE_YAML")
 	if vigPath == "" {
 		vigDir := envOr("VIGNOBLE_DIR", ".")
 		vigPath = filepath.Join(vigDir, "vignes.yaml")
 	}
-	return loadGroupIDs(vigPath)
+	cloneDir := filepath.Dir(vigPath)
+	gids, err := loadGroupIDs(vigPath)
+	if err != nil {
+		return nil, err
+	}
+	groups := make([]groupInfo, len(gids))
+	for i, gid := range gids {
+		groups[i] = groupInfo{id: gid, vignobleCloneDir: cloneDir}
+	}
+	return groups, nil
 }
 
 // ── Main curation pipeline ────────────────────────────────────────────────────
 
-func curateGroup(groupID string, emb *memory.Embedder, llm *memory.LLMClient) error {
+func curateGroup(groupID, vignobleCloneDir string, emb *memory.Embedder, llm *memory.LLMClient) error {
 	db, err := surreal.New(groupID)
 	if err != nil {
 		return fmt.Errorf("connect %s: %w", groupID, err)
 	}
 	defer db.Close()
 
-	// Resolve wiki repo path.
-	repoPath := wikiRepoPath(groupID)
+	// wikiDir is where markdown files are written; git operations run at vignobleCloneDir.
+	repoPath := wikiRepoPath(groupID, vignobleCloneDir)
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		return fmt.Errorf("create wiki dir %s: %w", repoPath, err)
+	}
 
 	// Phase 1: Incremental LLM synthesis for changed entities.
 	since, hasCursor, err := db.GetWikiCuratorCursor(groupID)
@@ -282,7 +310,7 @@ func curateGroup(groupID string, emb *memory.Embedder, llm *memory.LLMClient) er
 	pruneStaleWikiFiles(allPaths, repoPath, groupID)
 
 	if len(allPaths) > 0 {
-		if err := commitAndPush(repoPath, groupID, allPaths); err != nil {
+		if err := commitAndPush(vignobleCloneDir, groupID, repoPath, allPaths); err != nil {
 			log.Printf("WARN: git push %s: %v", groupID, err)
 		}
 	}
@@ -500,15 +528,30 @@ func processCluster(cl []map[string]any, db *surreal.Client, repoPath, groupID s
 	// Dedup AFTER synthesis: if a sufficiently-similar page already exists, write
 	// to ITS path instead of creating a near-duplicate. Done here (not pre-
 	// synthesis) so the final title's re-slug can't discard the match.
+	//
+	// Embedding-cosine (FindSimilarWikiDoc), role-scoped (#265), is the only
+	// dedup signal: it is semantic (whole-body similarity) so a high score is
+	// high-confidence and safe to auto-merge on. An inline lexical/LLM title-
+	// match signal was tried and reverted (#265 review, owner decision): a
+	// heuristic matcher compensating for an unstable identity key still makes
+	// irreversible merges, which is the wrong tool for this problem — a future
+	// consolidation tier (vigne/vignoble/global, supersede-not-delete) plus a
+	// stable concept identity will handle near-duplicates properly instead.
+	dedupPath := ""
+	dedupReason := ""
 	if vec != nil {
-		if existingPath, score, err := db.FindSimilarWikiDoc(vec); err == nil &&
+		if existingPath, score, err := db.FindSimilarWikiDoc(role, vec); err == nil &&
 			existingPath != "" && existingPath != okfPath && score >= dedupThresholdFor(role) {
-			log.Printf("INFO: near-dup %q matches existing %q (score=%.3f) — updating existing", okfPath, existingPath, score)
-			okfPath = existingPath
-			mdFile = filepath.Join(repoPath, okfPath+".md")
-			if fm := readFrontmatter(mdFile); fm["source"] == "human" {
-				return "", false, nil
-			}
+			dedupPath = existingPath
+			dedupReason = fmt.Sprintf("embedding score=%.3f", score)
+		}
+	}
+	if dedupPath != "" {
+		log.Printf("INFO: near-dup %q matches existing %q (%s) — updating existing", okfPath, dedupPath, dedupReason)
+		okfPath = dedupPath
+		mdFile = filepath.Join(repoPath, okfPath+".md")
+		if fm := readFrontmatter(mdFile); fm["source"] == "human" {
+			return "", false, nil
 		}
 	}
 
@@ -814,10 +857,20 @@ func branchName(groupID string) string {
 	return "wiki-curator/" + safe
 }
 
-func commitAndPush(repoPath, groupID string, writtenPaths []string) error {
-	if _, err := os.Stat(repoPath); os.IsNotExist(err) {
-		log.Printf("INFO: wiki repo %s does not exist — skipping git push", repoPath)
-		return nil
+// commitAndPush stages wiki/<groupID>/... files and commits/pushes them to the
+// vignoble repo. gitRoot is the vignoble clone root (actual git repository);
+// wikiDir is the subdirectory where the markdown files were written.
+func commitAndPush(gitRoot, groupID, wikiDir string, writtenPaths []string) error {
+	// Verify gitRoot is a real git repo; bail with an error (not a silent skip)
+	// so the caller can log and the regression test can catch this.
+	gitDirCheck := exec.Command("git", "-C", gitRoot, "rev-parse", "--git-dir")
+	if out, err := gitDirCheck.Output(); err != nil || strings.TrimSpace(string(out)) == "" {
+		return fmt.Errorf("commitAndPush: %s is not a git repository", gitRoot)
+	}
+
+	// Ensure the wiki subdir exists.
+	if err := os.MkdirAll(wikiDir, 0o755); err != nil {
+		return fmt.Errorf("create wiki dir: %w", err)
 	}
 
 	branch := branchName(groupID)
@@ -825,7 +878,7 @@ func commitAndPush(repoPath, groupID string, writtenPaths []string) error {
 
 	runGit := func(args ...string) (string, string, error) {
 		c := exec.Command("git", args...)
-		c.Dir = repoPath
+		c.Dir = gitRoot
 		var outBuf, errBuf strings.Builder
 		c.Stdout = &outBuf
 		c.Stderr = &errBuf
@@ -836,10 +889,15 @@ func commitAndPush(repoPath, groupID string, writtenPaths []string) error {
 	runGit("fetch", "origin") //nolint:errcheck — best-effort
 	runGit("checkout", "-B", branch)
 
+	// Stage files using paths relative to gitRoot so git works correctly.
 	for _, p := range writtenPaths {
-		mdFile := filepath.Join(repoPath, p+".md")
-		if _, err := os.Stat(mdFile); err == nil {
-			runGit("add", mdFile) //nolint:errcheck
+		// p is relative to wikiDir; convert to path relative to gitRoot.
+		relWiki, err := filepath.Rel(gitRoot, filepath.Join(wikiDir, p+".md"))
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(gitRoot, relWiki)); err == nil {
+			runGit("add", relWiki) //nolint:errcheck
 		}
 	}
 
@@ -863,7 +921,7 @@ func commitAndPush(repoPath, groupID string, writtenPaths []string) error {
 		return nil
 	}
 
-	defaultBranch := detectDefaultBranch(repoPath, runGit)
+	defaultBranch := detectDefaultBranch(gitRoot, runGit)
 	title := fmt.Sprintf("wiki(curator): full wiki snapshot for %s", groupID)
 
 	_, stderr, err := runGit(
@@ -875,7 +933,7 @@ func commitAndPush(repoPath, groupID string, writtenPaths []string) error {
 	)
 	if err != nil {
 		// Try REST fallback.
-		if mrURL := openMRviaREST(repoPath, branch, defaultBranch, title, groupID); mrURL != "" {
+		if mrURL := openMRviaREST(gitRoot, branch, defaultBranch, title, groupID); mrURL != "" {
 			log.Printf("INFO: MR for %s: %s (via REST)", groupID, mrURL)
 		} else {
 			return fmt.Errorf("git push failed: %w", err)
@@ -885,6 +943,9 @@ func commitAndPush(repoPath, groupID string, writtenPaths []string) error {
 			log.Printf("INFO: MR for %s: %s (via push options)", groupID, mrURL)
 		}
 	}
+	// Write sentinel timestamp for git-publish health signal.
+	sentinel := filepath.Join(wikiDir, ".wiki_commit_ts")
+	_ = os.WriteFile(sentinel, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644)
 	return nil
 }
 
@@ -1047,9 +1108,11 @@ func readFrontmatter(mdFile string) map[string]any {
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
-func wikiRepoPath(groupID string) string {
-	base := envOr("WIKI_CLONE_DIR", "/data/repos")
-	return filepath.Join(base, groupID, "wiki")
+// wikiRepoPath returns the directory where wiki markdown files for groupID
+// are written. It lives under the vignoble clone root so git tracks them.
+// vignobleCloneDir is the root of the cloned vignoble repo.
+func wikiRepoPath(groupID, vignobleCloneDir string) string {
+	return filepath.Join(vignobleCloneDir, "wiki", groupID)
 }
 
 func rolePath(role, slug string) string {

@@ -235,7 +235,7 @@ var initCmd = &cobra.Command{
 }
 
 // writeSoloCredentials writes ~/.config/pinard/credentials.yaml with localhost
-// endpoints suitable for solo-mode operation (pinard-services Docker image or
+// endpoints suitable for solo-mode operation (pinard-solo Docker image or
 // macOS native ServiceOrchestrator app). Reads port overrides from the macOS
 // config.json when present; uses defaults elsewhere. Preserves an existing file.
 func writeSoloCredentials() error {
