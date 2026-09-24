@@ -491,18 +491,15 @@ func TestMRWatcher_AutoMergeSkipsDraft(t *testing.T) {
 func TestMRWatcher_ConductorMarkedNotesForwarded(t *testing.T) {
 	notes := []gitlab.Note{
 		{ID: 1, Body: "worker progress note", System: false, Author: gitlab.Author{Username: "pinard"}},
-		{ID: 2, Body: "fix the authz gap\n\n" + conductorMarker, System: false, Author: gitlab.Author{Username: "pinard"}},
+		{ID: 2, Body: "fix the authz gap\n\n" + ConductorMarker, System: false, Author: gitlab.Author{Username: "pinard"}},
 		{ID: 3, Body: "human review", System: false, Author: gitlab.Author{Username: "lelongs"}},
 	}
-	ignored := map[string]bool{"pinard": true}
+	w := &MRWatcher{IgnoredAuthors: map[string]bool{"pinard": true}}
 	lastNoteID := 0
 
 	var filtered []gitlab.Note
 	for _, n := range notes {
-		if n.System || n.ID <= lastNoteID || (n.Resolvable && n.Resolved) {
-			continue
-		}
-		if ignored[n.Author.Username] && !strings.Contains(n.Body, conductorMarker) {
+		if n.ID <= lastNoteID || !w.shouldForwardNote(n) {
 			continue
 		}
 		filtered = append(filtered, n)
@@ -515,12 +512,32 @@ func TestMRWatcher_ConductorMarkedNotesForwarded(t *testing.T) {
 		t.Errorf("first forwarded note should be the conductor-marked one (ID=2), got ID=%d", filtered[0].ID)
 	}
 	// The marker must be stripped before the note reaches the worker.
-	cleaned := strings.TrimSpace(strings.ReplaceAll(filtered[0].Body, conductorMarker, ""))
-	if strings.Contains(cleaned, conductorMarker) {
+	cleaned := strings.TrimSpace(strings.ReplaceAll(filtered[0].Body, ConductorMarker, ""))
+	if strings.Contains(cleaned, ConductorMarker) {
 		t.Error("conductor marker should be stripped from the forwarded body")
 	}
 	if cleaned != "fix the authz gap" {
 		t.Errorf("cleaned body = %q, want %q", cleaned, "fix the authz gap")
+	}
+}
+
+// BUG REGRESSION (#305): a maître review posted via the raw pressoir comment-pr
+// primitive (no conductor marker) must be dropped, while the same review posted
+// via the comment_mr tool / `aoc comment-mr` (marker appended) must be forwarded.
+// This is the exact failure mode from #305: the needs_review template told the
+// maître to use the unmarked primitive, so every maître review was invisible to
+// the vendangeur.
+func TestMRWatcher_UnmarkedConductorNoteSkipped_MarkedForwarded(t *testing.T) {
+	w := &MRWatcher{IgnoredAuthors: map[string]bool{"pinard": true}}
+
+	unmarked := gitlab.Note{ID: 1, Body: "LGTM 🍇 Reviewed by the webterm maître", System: false, Author: gitlab.Author{Username: "pinard"}}
+	if w.shouldForwardNote(unmarked) {
+		t.Error("unmarked conductor-authored note should be skipped")
+	}
+
+	marked := gitlab.Note{ID: 2, Body: "Please add a test for the edge case\n\n" + ConductorMarker, System: false, Author: gitlab.Author{Username: "pinard"}}
+	if !w.shouldForwardNote(marked) {
+		t.Error("marked conductor-authored note should be forwarded")
 	}
 }
 

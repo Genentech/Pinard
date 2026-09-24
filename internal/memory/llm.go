@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -69,20 +70,28 @@ func (p *staticKeyProvider) GetToken() (string, error) {
 	return p.key, nil
 }
 
+// urlTokenProvider fetches a bearer token from one or more pour URLs,
+// round-robining across them per call. A single-URL slice is the common case.
 type urlTokenProvider struct {
-	url string
-	hc  *http.Client
+	urls []string
+	hc   *http.Client
+	mu   sync.Mutex
+	idx  int
 }
 
-func (p *urlTokenProvider) GetToken() (string, error) {
-	resp, err := p.hc.Get(p.url)
+// fetchOneToken retrieves a token from a single URL.
+func fetchOneToken(url string, hc *http.Client) (string, error) {
+	resp, err := hc.Get(url) //nolint:gosec
 	if err != nil {
-		return "", &LLMAuthError{Message: fmt.Sprintf("token URL fetch failed: %v", err)}
+		return "", fmt.Errorf("fetch failed: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusGone {
+		return "", fmt.Errorf("pour URL revoked (410 Gone): %s", url)
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "", &LLMAuthError{Message: fmt.Sprintf("token URL HTTP %d", resp.StatusCode)}
+		return "", fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
 	}
 	ct := resp.Header.Get("Content-Type")
 	if strings.Contains(ct, "application/json") {
@@ -97,9 +106,28 @@ func (p *urlTokenProvider) GetToken() (string, error) {
 	}
 	key := strings.TrimSpace(string(body))
 	if key == "" {
-		return "", &LLMAuthError{Message: "token URL returned empty key"}
+		return "", fmt.Errorf("empty token from %s", url)
 	}
 	return key, nil
+}
+
+func (p *urlTokenProvider) GetToken() (string, error) {
+	p.mu.Lock()
+	start := p.idx
+	p.idx = (p.idx + 1) % len(p.urls)
+	p.mu.Unlock()
+
+	var lastErr error
+	for i := range p.urls {
+		url := p.urls[(start+i)%len(p.urls)]
+		tok, err := fetchOneToken(url, p.hc)
+		if err == nil {
+			return tok, nil
+		}
+		log.Printf("[llm] token URL %s failed: %v", url, err)
+		lastErr = err
+	}
+	return "", &LLMAuthError{Message: fmt.Sprintf("all token URLs failed; last error: %v", lastErr)}
 }
 
 type googleSAProvider struct {
@@ -187,20 +215,38 @@ func resolveTokenProvider(api string, hc *http.Client) (tokenProvider, error) {
 		}
 		return &googleSAProvider{saPath: saPath}, nil
 	case "url":
-		u := os.Getenv("MEMORY_TOKEN_URL")
-		if u == "" {
-			return nil, fmt.Errorf("MEMORY_LLM_AUTH=url requires MEMORY_TOKEN_URL")
+		urls := resolveTokenURLs()
+		if len(urls) == 0 {
+			return nil, fmt.Errorf("MEMORY_LLM_AUTH=url requires MEMORY_TOKEN_URLS or MEMORY_TOKEN_URL")
 		}
-		return &urlTokenProvider{url: u, hc: hc}, nil
+		return &urlTokenProvider{urls: urls, hc: hc}, nil
 	case "static-key":
 		return &staticKeyProvider{key: staticKeyForAPI(api)}, nil
 	}
 
 	// Auto-detect.
-	if u := os.Getenv("MEMORY_TOKEN_URL"); u != "" {
-		return &urlTokenProvider{url: u, hc: hc}, nil
+	if urls := resolveTokenURLs(); len(urls) > 0 {
+		return &urlTokenProvider{urls: urls, hc: hc}, nil
 	}
 	return &staticKeyProvider{key: staticKeyForAPI(api)}, nil
+}
+
+// resolveTokenURLs returns the pour-URL list from MEMORY_TOKEN_URLS (comma-separated)
+// or falls back to a single MEMORY_TOKEN_URL. Returns nil if neither is set.
+func resolveTokenURLs() []string {
+	if v := os.Getenv("MEMORY_TOKEN_URLS"); v != "" {
+		var urls []string
+		for _, u := range strings.Split(v, ",") {
+			if u = strings.TrimSpace(u); u != "" {
+				urls = append(urls, u)
+			}
+		}
+		return urls
+	}
+	if u := os.Getenv("MEMORY_TOKEN_URL"); u != "" {
+		return []string{u}
+	}
+	return nil
 }
 
 func staticKeyForAPI(api string) string {

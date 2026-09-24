@@ -49,7 +49,10 @@ func TestEndToEndReadOnlyStream(t *testing.T) {
 	if err := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", sess, "sh", "-c", loop).Run(); err != nil {
 		t.Fatalf("tmux new-session: %v", err)
 	}
-	t.Cleanup(func() { _ = exec.Command("tmux", "-L", socket, "kill-server").Run() })
+	t.Cleanup(func() {
+		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+		_ = os.Remove(tmuxSocketPath(socket))
+	})
 
 	// Responder attached to the scratch socket.
 	runResponder(t, nc, "test", socket)

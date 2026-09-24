@@ -23,7 +23,7 @@ describe("Contract: Interrupt channel", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("interrupt is published to correct NATS subject", async () => {

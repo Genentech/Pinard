@@ -248,6 +248,38 @@ aoc list-schedules      # schedules and their last run times
 aoc unschedule --name <name>
 ```
 
+## `aoc gc` — agent garbage collector {#aoc-gc}
+
+Reap workers that are done and sweep orphaned tmux socket files. Safe by default:
+never touches conductor/maître/régisseur, open-MR workers, active-turn workers, or
+fresh remote/standalone workers.
+
+```bash
+aoc gc                          # reap finished workers + sweep dead sockets
+aoc gc --dry-run                # preview what would be collected; no changes
+aoc gc --vignoble myproject     # scope to a specific vignoble
+aoc gc --all                    # scope to all vignobles in the KV bucket
+aoc gc --older-than 30m         # idle grace period before a finished worker is reaped (default 10m)
+aoc gc --no-workers             # skip worker reaping (sockets only)
+aoc gc --no-sockets             # skip tmux socket sweep (workers only)
+```
+
+**Reap criteria** (a worker is reaped when it meets any of these):
+
+| Criterion | Condition |
+|-----------|----------|
+| Ephemeral / scheduled | Idle longer than `--older-than`, not actively turning |
+| Abandoned | No local tmux session, heartbeat stale > 4 h |
+| Stopped / done | `state=stopped` or `state=done` and idle > `--older-than` |
+
+**Always preserved:** the `conductor` session and reserved windows, workers with an
+open non-merged MR, workers actively running a turn (`tempo=active`), and remote/
+standalone workers with a recent heartbeat (within 4 hours).
+
+Reaping kills the tmux session, removes the KV entry, and removes the worktree.
+Socket sweep removes dead `pinard-*` sockets and leftover webterm-test sockets in
+`/tmp/tmux-<uid>/`.
+
 ## `aoc` — web terminal
 
 ```bash
@@ -255,6 +287,7 @@ aoc webterm-link --target <session>            # print a read-only browser link
 aoc webterm-link --target <session> --auto     # same, but print nothing (exit 0) when webterm/post_links is off
 aoc webterm-responder                          # run the tmux-backed host responder
 aoc webterm-worker-responder                   # daemon-less PTY responder (HPC / no-tmux path)
+aoc webterm-doctor [vignoble]                  # diagnose /sessions visibility for all agents
 ```
 
 The link is **unsigned** when Cognito SSO is enabled (gateway grants only SSO'd operators)
@@ -265,6 +298,24 @@ to append a link only when one exists.
 directly over NATS using the same grant-gated protocol — no tmux required. It is
 launched automatically by `bin/pinard --worker` on daemon-less or Singularity hosts
 where tmux is unavailable.
+
+`aoc webterm-doctor` connects to NATS, reads all records from the `pinard-agents` KV
+bucket, and prints per-agent include/exclude reasoning matching the logic the gateway's
+`/sessions` index uses. Use it to diagnose why a worker does not appear in the
+control-room index:
+
+```bash
+aoc webterm-doctor                           # use resolved vignoble
+aoc webterm-doctor myproject                 # pass vignoble as positional argument
+aoc webterm-doctor --vignoble-name myproject # or as a flag
+```
+
+Output columns: `VERDICT` (INCLUDE / EXCLUDE / LOCAL / ERROR), `KEY`, and `REASON`
+(e.g. vignoble mismatch, stale lastSeen, missing name, or the role + state for
+included agents). "LOCAL" means the agent appears via tmux listing, not the KV scan.
+Deleted/tombstoned KV keys (from normal worker teardown) are skipped silently rather
+than printed as `ERROR` rows; a trailing `(skipped N deleted/tombstoned keys)` line
+reports how many were filtered out.
 
 | Flag (`webterm-worker-responder`) | Purpose |
 |-----------------------------------|---------|
@@ -377,10 +428,11 @@ aoc memory-status --timeout 5000            # request timeout in milliseconds (d
 |---------|----------------|
 | **Engram** | Reachable (true/false) + pending cloud-sync count |
 | **SurrealDB** | Per-group ingest lag, failed-write count, last ingest time |
-| **Wiki** | Per-group doc count, auto-serve count, curator cursor |
+| **Wiki** | Per-group doc count, auto-serve count, git-publish status, last wiki commit |
 
-The command exits non-zero when any group has lag > 0, failed writes > 0, or the
-ingester is unreachable. Suitable as a health check in scripts and CI.
+The command exits non-zero when any group has lag > 0, failed writes > 0, wiki docs
+exist but have not been git-committed/pushed (`git_publish_ok=false`), or the ingester
+is unreachable. Suitable as a health check in scripts and CI.
 
 ### `aoc ontology validate`
 
@@ -413,6 +465,12 @@ domain file and configure the domain loader (`PINARD_ONTOLOGY_DIRS`).
 aoc create-user --name alice --vignoble myproject     # NATS account/user (requires nsc)
 aoc cleanup archive --project <p> --change <name>     # archive a completed openspec change
 ```
+
+`aoc create-user` only applies to self-hosted **nsc/JWT** NATS deployments. Config-account
+deployments (Helm/Vault-managed, e.g. production `pinard-nats`) use a single
+pre-configured account with unrestricted permissions, so this command is a no-op there —
+running it without `nsc` installed now prints an explanation instead of a bare "not
+found" error.
 
 Additional internal subcommands (`resolve-model`, `vigne-args`, `env-exports`,
 `ensure-proxy-provider`, `governance-prompt`, `nats-publish`) exist for the launcher and

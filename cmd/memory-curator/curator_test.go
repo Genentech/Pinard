@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -350,5 +351,117 @@ func TestIsDegenerateScaffold(t *testing.T) {
 	// non-scaffold name is never degenerate regardless of desc
 	if isDegenerateScaffold("PostgreSQL migration", "x") {
 		t.Error("non-scaffold name flagged degenerate")
+	}
+}
+
+// ── Wiki path + git regression tests ─────────────────────────────────────────
+
+// TestWikiRepoPath_ResolvesUnderVignobleClone asserts that wikiRepoPath places
+// files inside the vignoble clone, not an orphaned directory.
+func TestWikiRepoPath_ResolvesUnderVignobleClone(t *testing.T) {
+	cloneDir := t.TempDir()
+	got := wikiRepoPath("pinard", cloneDir)
+	want := filepath.Join(cloneDir, "wiki", "pinard")
+	if got != want {
+		t.Errorf("wikiRepoPath = %q, want %q", got, want)
+	}
+	// Must NOT produce an orphaned path like /data/repos/pinard/wiki.
+	if !strings.HasPrefix(got, cloneDir) {
+		t.Errorf("wikiRepoPath %q is not under vignoble clone %q", got, cloneDir)
+	}
+}
+
+// TestCommitAndPush_FailsOnNonGitDir asserts commitAndPush returns an error
+// when the target directory is not a git repository. This is the exact
+// regression seen in production (silently wrote to /data/repos/pinard/wiki).
+func TestCommitAndPush_FailsOnNonGitDir(t *testing.T) {
+	nonGit := t.TempDir()
+	wikiDir := filepath.Join(nonGit, "wiki", "pinard")
+	if err := os.MkdirAll(wikiDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := commitAndPush(nonGit, "pinard", wikiDir, []string{"decisions/test"})
+	if err == nil {
+		t.Fatal("commitAndPush on non-git dir should return an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a git repository") {
+		t.Errorf("expected 'not a git repository' error, got: %v", err)
+	}
+}
+
+// TestCommitAndPush_StagesInVignobleClone asserts that commitAndPush stages
+// and commits wiki files inside a real git repo (the vignoble clone pattern).
+func TestCommitAndPush_StagesInVignobleClone(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	gitRoot := t.TempDir()
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		c.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	run(gitRoot, "init")
+	run(gitRoot, "config", "user.email", "test@test.com")
+	run(gitRoot, "config", "user.name", "test")
+	// Initial commit so branch exists.
+	readmePath := filepath.Join(gitRoot, "README.md")
+	if err := os.WriteFile(readmePath, []byte("# vignoble\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(gitRoot, "add", "README.md")
+	run(gitRoot, "commit", "--no-verify", "-m", "init")
+
+	// Create the wiki file as the curator would.
+	wikiDir := filepath.Join(gitRoot, "wiki", "pinard")
+	if err := os.MkdirAll(filepath.Join(wikiDir, "decisions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mdPath := filepath.Join(wikiDir, "decisions", "test.md")
+	if err := os.WriteFile(mdPath, []byte("---\ntitle: Test\n---\n# Body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// DRY_RUN so we don't try to push to a remote.
+	t.Setenv("DRY_RUN", "1")
+	t.Setenv("GIT_AUTHOR_NAME", "test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "test@test.com")
+	t.Setenv("GIT_COMMITTER_NAME", "test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "test@test.com")
+
+	if err := commitAndPush(gitRoot, "pinard", wikiDir, []string{"decisions/test"}); err != nil {
+		t.Fatalf("commitAndPush: %v", err)
+	}
+
+	// Verify the commit landed in the vignoble repo.
+	c := exec.Command("git", "log", "--oneline", "-1")
+	c.Dir = gitRoot
+	out, err := c.Output()
+	if err != nil {
+		t.Fatalf("git log: %v", err)
+	}
+	if !strings.Contains(string(out), "feat(wiki)") {
+		t.Errorf("expected feat(wiki) commit, got: %s", out)
+	}
+
+	// Verify the staged file is under wiki/pinard/.
+	c2 := exec.Command("git", "show", "--name-only", "--format=", "HEAD")
+	c2.Dir = gitRoot
+	out2, err := c2.Output()
+	if err != nil {
+		t.Fatalf("git show: %v", err)
+	}
+	if !strings.Contains(string(out2), "wiki/pinard/decisions/test.md") {
+		t.Errorf("expected wiki/pinard/decisions/test.md in commit, got:\n%s", out2)
 	}
 }

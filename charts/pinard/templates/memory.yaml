@@ -9,6 +9,9 @@
 {{- $vignesConfigMapName := printf "%s-vignes" $name }}
 {{- $hasNatsCreds := and $c.vault.enabled $c.vault.natsPasswordKey }}
 {{- $hasEngramRoDsn := and $c.vault.enabled $c.vault.engramRoDsnKey }}
+{{- $hasGeminiSA := eq ($c.config.llmAuth | default "") "google-sa" }}
+{{- $llmTokenUrls := "" }}
+{{- if $c.config.llmTokenUrls }}{{- $llmTokenUrls = join "," $c.config.llmTokenUrls }}{{- end }}
 {{- $hasVignes := and $c.vignes $c.vignes.data }}
 {{- $hasCaBundle := and $c.caBundle $c.caBundle.enabled }}
 {{- $caBundleMountPath := "/etc/ssl/extra-ca" }}
@@ -94,8 +97,10 @@ spec:
   data:
     - secretKey: root-pass
       remoteRef: { key: {{ $v.path }}, property: {{ $v.passwdKey }} }
+    {{- if $hasGeminiSA }}
     - secretKey: sa.json
       remoteRef: { key: {{ $v.path }}, property: {{ $v.geminiSaKey }} }
+    {{- end }}
     {{- if $v.natsPasswordKey }}
     - secretKey: nats-password
       remoteRef: { key: {{ $v.path }}, property: {{ $v.natsPasswordKey }} }
@@ -213,8 +218,8 @@ spec:
                   key: root-pass
             - name: ENGRAM_URL
               value: {{ $c.config.engramUrl | quote }}
-            - name: ROSETTA_URL
-              value: {{ $c.config.rosettaUrl | quote }}
+            - name: EMBEDDING_URL
+              value: {{ $c.config.embeddingUrl | quote }}
             {{- if $hasNatsCreds }}
             - name: NATS_PASSWORD
               valueFrom:
@@ -268,8 +273,17 @@ spec:
               value: {{ $c.config.llmModel | quote }}
             - name: MEMORY_LLM_BASE_URL
               value: {{ $c.config.llmBaseUrl | quote }}
+            {{- if $llmTokenUrls }}
+            - name: MEMORY_TOKEN_URLS
+              value: {{ $llmTokenUrls | quote }}
+            {{- else if $c.config.llmTokenUrl }}
+            - name: MEMORY_TOKEN_URL
+              value: {{ $c.config.llmTokenUrl | quote }}
+            {{- end }}
+            {{- if $hasGeminiSA }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/secrets/gemini/sa.json"
+            {{- end }}
             - name: VIGNOBLE_LOGS
               value: "/tmp/memory-logs"
             {{- if $hasSsh }}
@@ -294,7 +308,7 @@ spec:
               value: {{ $gitEmail | quote }}
             {{- end }}
           volumeMounts:
-            {{- if $c.vault.enabled }}
+            {{- if and $c.vault.enabled $hasGeminiSA }}
             - name: gemini-sa
               mountPath: /secrets/gemini
               readOnly: true
@@ -340,8 +354,8 @@ spec:
                   key: root-pass
             - name: ENGRAM_URL
               value: {{ $c.config.engramUrl | quote }}
-            - name: ROSETTA_URL
-              value: {{ $c.config.rosettaUrl | quote }}
+            - name: EMBEDDING_URL
+              value: {{ $c.config.embeddingUrl | quote }}
             {{- if $hasNatsCreds }}
             - name: NATS_PASSWORD
               valueFrom:
@@ -364,8 +378,17 @@ spec:
               value: {{ $c.config.llmModel | quote }}
             - name: MEMORY_LLM_BASE_URL
               value: {{ $c.config.llmBaseUrl | quote }}
+            {{- if $llmTokenUrls }}
+            - name: MEMORY_TOKEN_URLS
+              value: {{ $llmTokenUrls | quote }}
+            {{- else if $c.config.llmTokenUrl }}
+            - name: MEMORY_TOKEN_URL
+              value: {{ $c.config.llmTokenUrl | quote }}
+            {{- end }}
+            {{- if $hasGeminiSA }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/secrets/gemini/sa.json"
+            {{- end }}
             - name: VIGNOBLE_LOGS
               value: "/tmp/memory-logs"
             - name: SSL_CERT_FILE
@@ -377,7 +400,7 @@ spec:
               value: {{ $caBundleCertFile | quote }}
             {{- end }}
           volumeMounts:
-            {{- if $c.vault.enabled }}
+            {{- if and $c.vault.enabled $hasGeminiSA }}
             - name: gemini-sa
               mountPath: /secrets/gemini
               readOnly: true
@@ -409,8 +432,8 @@ spec:
                 secretKeyRef:
                   name: {{ if $c.vault.enabled }}{{ $vaultSecretName }}{{ else }}{{ $secretName }}{{ end }}
                   key: root-pass
-            - name: ROSETTA_URL
-              value: {{ $c.config.rosettaUrl | quote }}
+            - name: EMBEDDING_URL
+              value: {{ $c.config.embeddingUrl | quote }}
             {{- if $hasNatsCreds }}
             - name: NATS_PASSWORD
               valueFrom:
@@ -433,8 +456,17 @@ spec:
               value: {{ $c.config.llmModel | quote }}
             - name: MEMORY_LLM_BASE_URL
               value: {{ $c.config.llmBaseUrl | quote }}
+            {{- if $llmTokenUrls }}
+            - name: MEMORY_TOKEN_URLS
+              value: {{ $llmTokenUrls | quote }}
+            {{- else if $c.config.llmTokenUrl }}
+            - name: MEMORY_TOKEN_URL
+              value: {{ $c.config.llmTokenUrl | quote }}
+            {{- end }}
+            {{- if $hasGeminiSA }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/secrets/gemini/sa.json"
+            {{- end }}
             - name: VIGNOBLE_LOGS
               value: "/tmp/memory-logs"
             - name: SSL_CERT_FILE
@@ -460,7 +492,7 @@ spec:
               value: {{ $c.rollup.interval | quote }}
             {{- end }}
           volumeMounts:
-            {{- if $c.vault.enabled }}
+            {{- if and $c.vault.enabled $hasGeminiSA }}
             - name: gemini-sa
               mountPath: /secrets/gemini
               readOnly: true
@@ -501,8 +533,8 @@ spec:
                 secretKeyRef:
                   name: {{ if $c.vault.enabled }}{{ $vaultSecretName }}{{ else }}{{ $secretName }}{{ end }}
                   key: root-pass
-            - name: ROSETTA_URL
-              value: {{ $c.config.rosettaUrl | quote }}
+            - name: EMBEDDING_URL
+              value: {{ $c.config.embeddingUrl | quote }}
             - name: MEMORY_LLM_API
               value: {{ $c.config.llmApi | quote }}
             - name: MEMORY_LLM_AUTH
@@ -511,8 +543,17 @@ spec:
               value: {{ $c.config.llmModel | quote }}
             - name: MEMORY_LLM_BASE_URL
               value: {{ $c.config.llmBaseUrl | quote }}
+            {{- if $llmTokenUrls }}
+            - name: MEMORY_TOKEN_URLS
+              value: {{ $llmTokenUrls | quote }}
+            {{- else if $c.config.llmTokenUrl }}
+            - name: MEMORY_TOKEN_URL
+              value: {{ $c.config.llmTokenUrl | quote }}
+            {{- end }}
+            {{- if $hasGeminiSA }}
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/secrets/gemini/sa.json"
+            {{- end }}
             - name: SSL_CERT_FILE
               value: {{ $c.config.sslCertFile | default "/etc/ssl/certs/ca-certificates.crt" | quote }}
             - name: REQUESTS_CA_BUNDLE
@@ -537,8 +578,25 @@ spec:
             {{- end }}
             - name: WIKI_CLONE_DIR
               value: {{ $cloneDir | quote }}
+            {{- if $hasSsh }}
+            # git identity + ssh so the curator can commit AND push wiki pages to
+            # the vignoble repo. Without an identity, `git commit` fails exit 128
+            # ("Author identity unknown") and nothing is ever pushed (#293).
+            # Native git env — no git config / writable HOME needed; survives the
+            # emptyDir re-clone. BOTH author+committer pairs (committer gotcha).
+            - name: GIT_SSH_COMMAND
+              value: {{ printf "ssh -i /secrets/ssh/%s -o IdentitiesOnly=yes -o UserKnownHostsFile=/etc/ssh-config/known_hosts -o StrictHostKeyChecking=yes" $sshKey | quote }}
+            - name: GIT_AUTHOR_NAME
+              value: pinard
+            - name: GIT_AUTHOR_EMAIL
+              value: {{ $gitEmail | quote }}
+            - name: GIT_COMMITTER_NAME
+              value: pinard
+            - name: GIT_COMMITTER_EMAIL
+              value: {{ $gitEmail | quote }}
+            {{- end }}
           volumeMounts:
-            {{- if $c.vault.enabled }}
+            {{- if and $c.vault.enabled $hasGeminiSA }}
             - name: gemini-sa
               mountPath: /secrets/gemini
               readOnly: true
@@ -551,6 +609,12 @@ spec:
             {{- if $hasSsh }}
             - name: repos
               mountPath: {{ $cloneDir | quote }}
+            - name: ssh-key
+              mountPath: /secrets/ssh
+              readOnly: true
+            - name: ssh-config
+              mountPath: /etc/ssh-config
+              readOnly: true
             {{- end }}
             {{- if $hasCaBundle }}
             - name: ca-bundle
@@ -565,7 +629,7 @@ spec:
             {{- end }}
 {{- end }}
       volumes:
-        {{- if $c.vault.enabled }}
+        {{- if and $c.vault.enabled $hasGeminiSA }}
         - name: gemini-sa
           secret:
             secretName: {{ $vaultSecretName }}

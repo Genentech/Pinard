@@ -11,22 +11,30 @@ name: Publish container images
 # (with RELEASE_TOKEN). workflow_dispatch allows manual (re)builds for a tag.
 #
 # Images published:
-#   ghcr.io/genentech/pinard:<version>           — k8s services image (webterm-gateway +
+#   ghcr.io/genentech/pinard:<version>           — the agent/worker image (régisseur,
+#                                                   maître, and vendangeur/worker all run
+#                                                   this same binary; role is selected by
+#                                                   the args passed to `pinard`). Built
+#                                                   from the root Dockerfile. Includes the
+#                                                   vendored Node/Pi runtime, `aoc`, and a
+#                                                   pinned `engram` binary (mem_* tools).
+#   ghcr.io/genentech/pinard-backend:<version>   — k8s services image (webterm-gateway +
 #                                                   memory services + static docs site),
-#                                                   built from the root Dockerfile.
-#                                                   Does NOT include the aoc CLI/daemon,
-#                                                   which is host-installed (see install).
+#                                                   built from build/pinard-backend/Dockerfile.
+#                                                   Does NOT include the aoc CLI/daemon or
+#                                                   engram (see its own header comment).
 #   ghcr.io/genentech/pinard-webterm-gateway:<version> — standalone gateway image,
-#                                                   built from cmd/webterm-gateway/Dockerfile.
+#                                                   built from build/pinard-webterm-gateway/Dockerfile.
 #
 # Tags applied to each image:
 #   <semver>   e.g. 0.61.0
 #   latest
 #
-# Engram: the Gentleman-Programming/engram binary is a third-party release and is
-# intentionally NOT baked into a Genentech-published image to avoid licensing and
-# naming ambiguity. Install engram from https://github.com/Gentleman-Programming/engram
-# and mount/inject it at runtime if needed. See README for details.
+# ghcr.io/genentech/pinard is the OSS-only channel; it has no relationship to
+# the separate internal-registry image built from build/pinard-backend/Dockerfile
+# by a separate (internal-only) CI job. The two are deliberately named
+# differently on GHCR to avoid the naming collision that existed when both the
+# worker and the backend candidates were "pinard".
 
 on:
   push:
@@ -79,10 +87,9 @@ jobs:
           VERSION="${REF#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      # ── k8s services image (root Dockerfile) ─────────────────────────────
-      # Includes: webterm-gateway, memory services, static docs site.
-      # Does NOT include aoc (host-installed CLI/daemon — see install script).
-      - name: Build and push k8s services image
+      # ── Agent/worker image (root Dockerfile) ──────────────────────────────
+      # Includes: vendored Node/Pi runtime, aoc, pinard-extensions, engram.
+      - name: Build and push agent/worker image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -92,19 +99,40 @@ jobs:
           tags: |
             ${{ env.IMAGE_BASE }}:${{ steps.version.outputs.version }}
             ${{ env.IMAGE_BASE }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+            VERSION=${{ steps.version.outputs.version }}
+            BUILT_AT=${{ github.event.repository.updated_at }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
 
-      # ── Standalone gateway image (cmd/webterm-gateway/Dockerfile) ─────────
+      # ── k8s services image (build/pinard-backend/Dockerfile) ─────────────
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/pinard-backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_BASE }}-backend:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE_BASE }}-backend:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      # ── Standalone gateway image (build/pinard-webterm-gateway/Dockerfile) ─
       - name: Build and push webterm-gateway image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: cmd/webterm-gateway/Dockerfile
+          file: build/pinard-webterm-gateway/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ env.IMAGE_BASE }}-webterm-gateway:${{ steps.version.outputs.version }}
             ${{ env.IMAGE_BASE }}-webterm-gateway:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=webterm-gateway
+          cache-to: type=gha,mode=max,scope=webterm-gateway

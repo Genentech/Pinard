@@ -103,6 +103,53 @@ func (k *KV) Del(bucket, key string) error {
 	return kv.Delete(key)
 }
 
+// WatchAll returns a continuous watcher over every key in bucket, delivering
+// the initial snapshot followed by live updates (a nil-value Put entry marks
+// end-of-snapshot per the underlying nats.go semantics). Callers own the
+// returned watcher's lifecycle (Stop()). See internal/dashboard/panel_workers.go
+// for the recommended reconnect-on-expiry usage pattern.
+func (k *KV) WatchAll(bucket string, opts ...nats.WatchOpt) (nats.KeyWatcher, error) {
+	kv, err := k.getBucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	return kv.WatchAll(opts...)
+}
+
+// PurgeDeletes removes delete/purge markers older than olderThan from the
+// named bucket. This prevents tombstones from accumulating in the JetStream
+// stream that backs the bucket (e.g. from kv.Delete calls in orphan recovery
+// and worker shutdown). Only markers are removed — live values are untouched.
+func (k *KV) PurgeDeletes(bucket string, olderThan time.Duration) error {
+	kv, err := k.getBucket(bucket)
+	if err != nil {
+		return err
+	}
+	return kv.PurgeDeletes(nats.DeleteMarkersOlderThan(olderThan))
+}
+
+// NumSubjects returns the number of subjects (live + tombstoned) in the
+// JetStream stream backing the named KV bucket. Useful for observing compaction
+// progress: call before and after PurgeDeletes to log the delta.
+func (k *KV) NumSubjects(bucket string) (int, error) {
+	if err := k.client.Connect(); err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	prefix := "$KV." + bucket + "."
+	si, err := k.client.JS().StreamInfo(
+		"KV_"+bucket,
+		&nats.StreamInfoRequest{SubjectsFilter: prefix + ">"},
+		nats.Context(ctx),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return int(si.State.NumSubjects), nil
+}
+
 // Keys lists the keys in a KV bucket.
 //
 // It deliberately does NOT use nats.go's KeyValue.Keys()/ListKeys(), which both

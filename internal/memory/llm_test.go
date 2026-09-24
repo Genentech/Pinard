@@ -2,10 +2,12 @@ package memory
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,7 +121,7 @@ func TestURLTokenProvider(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := &urlTokenProvider{url: srv.URL, hc: &http.Client{}}
+	p := &urlTokenProvider{urls: []string{srv.URL}, hc: &http.Client{}}
 	tok, err := p.GetToken()
 	if err != nil {
 		t.Fatal(err)
@@ -305,5 +307,112 @@ func TestOpenAIChatURL(t *testing.T) {
 				t.Errorf("openAIChatURL()\n got: %s\nwant: %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// ── Round-robin urlTokenProvider tests ───────────────────────────────────────
+
+func TestURLTokenProviderRoundRobin(t *testing.T) {
+	// Two servers; verify that consecutive calls alternate between them.
+	calls := make([]int, 2)
+	make1 := func(i int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls[i]++
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"token": "tok"})
+		}))
+	}
+	s0 := make1(0)
+	s1 := make1(1)
+	defer s0.Close()
+	defer s1.Close()
+
+	p := &urlTokenProvider{urls: []string{s0.URL, s1.URL}, hc: &http.Client{}}
+	for i := 0; i < 4; i++ {
+		if _, err := p.GetToken(); err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i, err)
+		}
+	}
+	// Each server should have been called exactly twice.
+	if calls[0] != 2 || calls[1] != 2 {
+		t.Errorf("call distribution = %v, want [2 2]", calls)
+	}
+}
+
+func TestURLTokenProviderFailover(t *testing.T) {
+	// First server always returns 500; second returns a valid token.
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "good-token")
+	}))
+	defer good.Close()
+
+	p := &urlTokenProvider{urls: []string{bad.URL, good.URL}, hc: &http.Client{}}
+	tok, err := p.GetToken()
+	if err != nil {
+		t.Fatalf("expected failover to succeed, got: %v", err)
+	}
+	if tok != "good-token" {
+		t.Errorf("token = %q, want good-token", tok)
+	}
+}
+
+func TestURLTokenProviderAllFail(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "error", http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+
+	p := &urlTokenProvider{urls: []string{bad.URL, bad.URL}, hc: &http.Client{}}
+	_, err := p.GetToken()
+	if err == nil {
+		t.Fatal("expected error when all URLs fail")
+	}
+	if _, ok := err.(*LLMAuthError); !ok {
+		t.Errorf("expected *LLMAuthError, got %T: %v", err, err)
+	}
+}
+
+func TestURLTokenProviderGone(t *testing.T) {
+	gone := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "revoked", http.StatusGone)
+	}))
+	defer gone.Close()
+
+	p := &urlTokenProvider{urls: []string{gone.URL}, hc: &http.Client{}}
+	_, err := p.GetToken()
+	if err == nil {
+		t.Fatal("expected error for 410 Gone")
+	}
+	authErr, ok := err.(*LLMAuthError)
+	if !ok {
+		t.Fatalf("expected *LLMAuthError, got %T: %v", err, err)
+	}
+	if !strings.Contains(authErr.Message, "all token URLs failed") {
+		t.Errorf("error message %q does not mention all URLs failed", authErr.Message)
+	}
+}
+
+func TestResolveTokenProviderURLMulti(t *testing.T) {
+	t.Setenv("MEMORY_LLM_AUTH", "url")
+	t.Setenv("MEMORY_TOKEN_URLS", "https://url1.example.com,https://url2.example.com")
+	t.Setenv("MEMORY_TOKEN_URL", "")
+
+	tp, err := resolveTokenProvider("anthropic-messages", &http.Client{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p, ok := tp.(*urlTokenProvider)
+	if !ok {
+		t.Fatalf("expected *urlTokenProvider, got %T", tp)
+	}
+	if len(p.urls) != 2 {
+		t.Errorf("expected 2 URLs, got %d: %v", len(p.urls), p.urls)
+	}
+	if p.urls[0] != "https://url1.example.com" || p.urls[1] != "https://url2.example.com" {
+		t.Errorf("unexpected URLs: %v", p.urls)
 	}
 }

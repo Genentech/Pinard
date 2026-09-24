@@ -16,13 +16,15 @@ import (
 	"github.com/Genentech/pinard/internal/state"
 )
 
-// conductorMarker tags an MR note the conductor posts to direct a worker. The
+// ConductorMarker tags an MR note the conductor posts to direct a worker. The
 // conductor and workers share the pinard GitLab identity, so worker-authored
 // notes are normally ignored by the mr-watcher; a note carrying this marker is
-// forwarded to the worker anyway. Keep in sync with CONDUCTOR_MARKER in the
-// conductor extension (pi-extension/pinard/index.ts). The HTML comment renders
-// invisibly in GitLab and is stripped before the note reaches the worker.
-const conductorMarker = "<!-- pinard:conductor -->"
+// forwarded to the worker anyway. The only writers are `aoc comment-mr`
+// (cmd/aoc/cmd_comment_mr.go) and the `comment_mr` tool that shells out to it
+// (pi-extension/pinard/index.ts) — keep this as the single marker constant.
+// The HTML comment renders invisibly in GitLab and is stripped before the note
+// reaches the worker.
+const ConductorMarker = "<!-- pinard:conductor -->"
 
 // memoryMarkerPrefix is the @memory: review-note marker (§10). A reviewer can
 // prefix a note with this string to route its text directly into the /lesson
@@ -88,6 +90,10 @@ func (w *MRWatcher) Run() error {
 	if w.User != "" {
 		w.scanAssignedMRs()
 	}
+
+	// Collapse any duplicate (repo, MR) registrations before processing —
+	// see reconcileDuplicateMRs.
+	w.reconcileDuplicateMRs()
 
 	var watched map[string]*state.WatchedMR
 	w.State.Read(func(s *state.MRWatcherState) {
@@ -243,6 +249,149 @@ func (w *MRWatcher) Run() error {
 	}
 
 	return nil
+}
+
+// reconcileDuplicateMRs collapses WatchedMR entries that track the same
+// (Repo, MR) under more than one key. This happens when a single logical
+// agent registers via `aoc track-mr` under two different identities —
+// e.g. the issue-driven runID ("pinard-swe-<issue>") and the actual
+// tmux/session name ("<parcelle>--<project>-<hash>") — each carrying its
+// own independent ReviewedSHA/State, causing duplicate review/merge
+// dispatch (issue #308). The canonical entry is the one backed by a live
+// pinard-agents KV record, tie-broken on the most-advanced State
+// (post_merge > opened) and then the most recently checked. Progress
+// fields from the losing entries are merged into the canonical one
+// ("most advanced wins") before the losing keys are deleted, so no
+// in-flight review/pipeline/merge state is lost.
+func (w *MRWatcher) reconcileDuplicateMRs() {
+	groups := make(map[string][]string)
+	w.State.Read(func(s *state.MRWatcherState) {
+		for key, entry := range s.Watched {
+			if entry.Repo == "" || entry.MR == 0 {
+				continue
+			}
+			groupKey := fmt.Sprintf("%s#%d", entry.Repo, entry.MR)
+			groups[groupKey] = append(groups[groupKey], key)
+		}
+	})
+
+	for _, keys := range groups {
+		if len(keys) < 2 {
+			continue
+		}
+		w.State.Update(func(s *state.MRWatcherState) {
+			canonical := w.pickCanonicalMRKey(s, keys)
+			canonicalEntry := s.Watched[canonical]
+			if canonicalEntry == nil {
+				return
+			}
+			for _, key := range keys {
+				if key == canonical {
+					continue
+				}
+				loser := s.Watched[key]
+				if loser == nil {
+					continue
+				}
+				mergeWatchedMR(canonicalEntry, loser)
+				delete(s.Watched, key)
+				log.Printf("[mr-watcher] Reconciled duplicate MR entry %q into %q (MR !%d on %s)", key, canonical, canonicalEntry.MR, canonicalEntry.Project)
+			}
+		})
+	}
+}
+
+// pickCanonicalMRKey selects the surviving key among a set of duplicate
+// WatchedMR entries for the same (Repo, MR): prefer the one backed by a
+// live pinard-agents KV record, then the most-advanced State (post_merge >
+// opened), then the most recently checked entry.
+func (w *MRWatcher) pickCanonicalMRKey(s *state.MRWatcherState, keys []string) string {
+	best := keys[0]
+	for _, key := range keys[1:] {
+		if w.betterMRKey(s, key, best) {
+			best = key
+		}
+	}
+	return best
+}
+
+func (w *MRWatcher) betterMRKey(s *state.MRWatcherState, candidate, current string) bool {
+	c, cur := s.Watched[candidate], s.Watched[current]
+	if c == nil {
+		return false
+	}
+	if cur == nil {
+		return true
+	}
+	if cAlive, curAlive := w.sessionIsAlive(candidate), w.sessionIsAlive(current); cAlive != curAlive {
+		return cAlive
+	}
+	if r1, r2 := mrStateRank(c.State), mrStateRank(cur.State); r1 != r2 {
+		return r1 > r2
+	}
+	return c.LastChecked > cur.LastChecked
+}
+
+// mrStateRank ranks WatchedMR.State by how terminal it is, for canonical
+// selection and merge tie-breaking. post_merge is more advanced than the
+// (implicit, empty-string) opened state.
+func mrStateRank(state string) int {
+	if state == "post_merge" {
+		return 1
+	}
+	return 0
+}
+
+// mergeWatchedMR merges progress fields from src into dst using
+// "most advanced wins"/"non-empty wins" semantics, so reconciling a
+// duplicate entry never regresses state or re-triggers a dispatch that
+// either copy had already made.
+func mergeWatchedMR(dst, src *state.WatchedMR) {
+	if dst.Repo == "" {
+		dst.Repo = src.Repo
+	}
+	if dst.Project == "" {
+		dst.Project = src.Project
+	}
+	if dst.Parcelle == "" {
+		dst.Parcelle = src.Parcelle
+	}
+	if dst.ProcessName == "" {
+		dst.ProcessName = src.ProcessName
+	}
+	if src.LastNoteID > dst.LastNoteID {
+		dst.LastNoteID = src.LastNoteID
+	}
+	if src.LastPipelineID > dst.LastPipelineID {
+		dst.LastPipelineID = src.LastPipelineID
+	}
+	if src.PipelineFailCount > dst.PipelineFailCount {
+		dst.PipelineFailCount = src.PipelineFailCount
+	}
+	dst.ReviewPending = dst.ReviewPending || src.ReviewPending
+	dst.NeedsApprovalNotified = dst.NeedsApprovalNotified || src.NeedsApprovalNotified
+	if dst.ReviewedSHA == "" {
+		dst.ReviewedSHA = src.ReviewedSHA
+	}
+	dst.ReviewNotified = dst.ReviewNotified || src.ReviewNotified
+	dst.AutoMergeLabeled = dst.AutoMergeLabeled || src.AutoMergeLabeled
+	if mrStateRank(src.State) > mrStateRank(dst.State) {
+		dst.State = src.State
+	}
+	if dst.MergedAt == "" {
+		dst.MergedAt = src.MergedAt
+	}
+	if src.PostMergeChecks > dst.PostMergeChecks {
+		dst.PostMergeChecks = src.PostMergeChecks
+	}
+	if dst.MergeCommitSHA == "" {
+		dst.MergeCommitSHA = src.MergeCommitSHA
+	}
+	dst.MainPipelineDone = dst.MainPipelineDone || src.MainPipelineDone
+	dst.TagPipelineDone = dst.TagPipelineDone || src.TagPipelineDone
+	if src.LastChecked > dst.LastChecked {
+		dst.LastChecked = src.LastChecked
+	}
 }
 
 func (w *MRWatcher) scanAssignedMRs() {
@@ -762,6 +911,27 @@ func (w *MRWatcher) resolveWorkerParcelle(session string) string {
 	return session
 }
 
+// shouldForwardNote reports whether a note should be forwarded to the worker,
+// independent of the already-seen cursor (entry.LastNoteID, checked separately
+// by the caller since it depends on per-MR watch state). It skips system
+// notes, resolved review threads, and self-authored (worker/pinard) chatter
+// — EXCEPT conductor direction, which is posted under the same pinard
+// identity but carries ConductorMarker so it is forwarded anyway. Without
+// this, conductor↔worker MR comments are invisible to the worker (same
+// GitLab author).
+func (w *MRWatcher) shouldForwardNote(note gitlab.Note) bool {
+	if note.System {
+		return false
+	}
+	if note.Resolvable && note.Resolved {
+		return false
+	}
+	if w.IgnoredAuthors[note.Author.Username] && !strings.Contains(note.Body, ConductorMarker) {
+		return false
+	}
+	return true
+}
+
 func (w *MRWatcher) forwardNotes(sessionName string, entry *state.WatchedMR) {
 	notes, err := w.GitLab.ListMRNotes(entry.Repo, entry.MR)
 	if err != nil {
@@ -770,20 +940,10 @@ func (w *MRWatcher) forwardNotes(sessionName string, entry *state.WatchedMR) {
 
 	var newNotes []gitlab.Note
 	for _, note := range notes {
-		if note.System {
-			continue
-		}
 		if note.ID <= entry.LastNoteID {
 			continue
 		}
-		if note.Resolvable && note.Resolved {
-			continue
-		}
-		// Skip self-authored notes (worker/pinard chatter) — EXCEPT conductor
-		// direction, which is posted under the same pinard identity but carries an
-		// explicit marker so the worker acts on it. Without this, conductor↔worker
-		// MR comments are invisible to the worker (same GitLab author).
-		if w.IgnoredAuthors[note.Author.Username] && !strings.Contains(note.Body, conductorMarker) {
+		if !w.shouldForwardNote(note) {
 			continue
 		}
 		newNotes = append(newNotes, note)
@@ -806,7 +966,7 @@ func (w *MRWatcher) forwardNotes(sessionName string, entry *state.WatchedMR) {
 		}
 		replyCmd := fmt.Sprintf("glab api projects/%s/merge_requests/%d/discussions/%s/notes -X POST --hostname %s -f body=\"your reply\"",
 			encodedRepo, entry.MR, note.DiscussionID, w.GitLab.Host)
-		body := strings.TrimSpace(strings.ReplaceAll(note.Body, conductorMarker, ""))
+		body := strings.TrimSpace(strings.ReplaceAll(note.Body, ConductorMarker, ""))
 		parts = append(parts, fmt.Sprintf("%d. @%s%s: %s\n   Reply: %s", i+1, note.Author.Username, lineInfo, body, replyCmd))
 		notesDetail = append(notesDetail, map[string]any{
 			"note_id":       note.ID,
@@ -918,6 +1078,17 @@ func (w *MRWatcher) tryAutoReview(sessionName string, entry *state.WatchedMR) {
 	// Draft gate + get HEAD SHA in one call.
 	pr, err := w.pressoirFor(entry.Repo).GetPR(ctx, repoRef, entry.MR)
 	if err != nil {
+		return
+	}
+	// Terminal-state gate: never review-dispatch a merged/closed MR. This is
+	// the second, self-sufficient gate — Run() already skips post_merge
+	// entries, but tryAutoReview fetches its own fresh PR state and must not
+	// rely solely on the caller's earlier check (races between duplicate
+	// entries or fetches can otherwise let a stale in-flight review through).
+	// GitLab reports "opened"/"merged"/"closed"; GitHub reports
+	// "open"/"merged"/"closed" — check the two terminal values, not equality
+	// to "opened", to stay provider-neutral.
+	if pr.State == "merged" || pr.State == "closed" {
 		return
 	}
 	if pr.Draft {
@@ -1217,7 +1388,7 @@ func isReviewNoise(body string) bool {
 // marker (e.g. conductor direction or webterm link) that should not be ingested
 // as review knowledge.
 func isPinardMarker(body string) bool {
-	return strings.Contains(body, conductorMarker) ||
+	return strings.Contains(body, ConductorMarker) ||
 		strings.Contains(body, "<!-- pinard:") ||
 		strings.HasPrefix(strings.TrimSpace(body), "pinard:")
 }
@@ -1262,7 +1433,7 @@ func sanitizeReviewNote(body string) string {
 		}
 		// Drop lines that are (or contain) pinard marker tokens.
 		if strings.Contains(trimmed, "<!-- pinard:") ||
-			strings.Contains(trimmed, conductorMarker) ||
+			strings.Contains(trimmed, ConductorMarker) ||
 			strings.HasPrefix(trimmed, "pinard:") {
 			continue
 		}

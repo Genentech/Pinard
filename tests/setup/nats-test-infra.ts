@@ -27,7 +27,10 @@ export interface TestNatsInfra {
   sub(path: string): string;
 }
 
-const NATS_URL = process.env.PINARD_NATS_URL || "127.0.0.1:4222";
+// PINARD_TEST_NATS_URL (not PINARD_NATS_URL): the latter is exported by the
+// pinard launcher for the shared production cluster (often wss://), which the
+// plain-TCP `connect()` used here can't speak — see global-nats-setup.ts.
+const NATS_URL = process.env.PINARD_TEST_NATS_URL || "127.0.0.1:4222";
 
 export async function createTestNatsInfra(): Promise<TestNatsInfra> {
   const runId = randomUUID().slice(0, 8);

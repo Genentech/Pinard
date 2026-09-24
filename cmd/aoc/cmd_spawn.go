@@ -46,6 +46,7 @@ var spawnCmd = &cobra.Command{
 		noWorktree, _ := cmd.Flags().GetBool("no-worktree")
 		contractID, _ := cmd.Flags().GetString("contract-id")
 		noCapsule, _ := cmd.Flags().GetBool("no-capsule")
+		ephemeral, _ := cmd.Flags().GetBool("ephemeral")
 
 		if project == "" {
 			return fmt.Errorf("--project is required")
@@ -294,8 +295,8 @@ Instructions:
 		}
 
 		// Worktree vs in-place. Code workers get an isolated git worktree (branch per
-		// run, MR workflow). Data/orchestration workers (--no-worktree, e.g. the GWASDB
-		// build mutating /gne/...) run directly in the project path — there is no branch
+		// run, MR workflow). Data/orchestration workers (--no-worktree, e.g. a genomics
+		// build mutating /data/...) run directly in the project path — there is no branch
 		// to open and no MR; isolation comes from the container bind allow-list instead.
 		branchName := fmt.Sprintf("pinard/%s", name)
 		spawnDir := projectPath
@@ -640,6 +641,9 @@ Instructions:
 			if issueID != "" {
 				kvState["issue"] = issueID
 			}
+			if ephemeral {
+				kvState["ephemeral"] = true
+			}
 			kv.Put("pinard-agents", agentID, kvState)
 			nc.Close()
 		}
@@ -732,6 +736,7 @@ func init() {
 	spawnCmd.Flags().Bool("no-worktree", false, "Run in the project path without creating a git worktree (data/orchestration jobs)")
 	spawnCmd.Flags().String("contract-id", "", "Mnemosyne contract ID — injects PINARD_CAPSULE_CONTRACT into the worker env")
 	spawnCmd.Flags().Bool("no-capsule", false, "Skip capsule auto-detection; spawn on operator token even if the issue has a funded contract")
+	spawnCmd.Flags().Bool("ephemeral", false, "Mark this worker as ephemeral (e.g. scheduled/one-shot); allows aoc gc to reap it when done")
 	rootCmd.AddCommand(spawnCmd)
 
 	governancePromptCmd.Flags().String("process", "", "Babysitter process name (required)")

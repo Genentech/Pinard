@@ -28,7 +28,7 @@
 //	ENGRAM_SINCE_HOURS    — observation look-back window (default: 168)
 //	MEMORY_ENGRAM_SOURCE  — 'http' (default) or 'postgres'
 //	ENGRAM_PG_DSN         — Postgres DSN; required when MEMORY_ENGRAM_SOURCE=postgres
-//	ROSETTA_URL           — Rosetta embedding endpoint
+//	EMBEDDING_URL         — embedding endpoint (ROSETTA_URL is a deprecated alias)
 //	MEMORY_LLM_*          — LLM client configuration (see internal/memory/llm.go)
 //	MEMORY_GROUP_IDS      — comma-separated group_ids to filter/ingest (optional; overrides auto-discovery)
 //
@@ -571,10 +571,12 @@ type wikiStatusSection struct {
 }
 
 type wikiGroupStats struct {
-	Group       string `json:"group"`
-	Docs        int64  `json:"docs"`
-	AutoServe   int64  `json:"auto_serve"`
-	NeedsReview int64  `json:"needs_review"`
+	Group          string `json:"group"`
+	Docs           int64  `json:"docs"`
+	AutoServe      int64  `json:"auto_serve"`
+	NeedsReview    int64  `json:"needs_review"`
+	GitPublishOk   bool   `json:"git_publish_ok"`
+	LastWikiCommit string `json:"last_wiki_commit,omitempty"`
 }
 
 // engramMaxSeq queries the Postgres cloud_mutations table for the max seq for project.
@@ -667,11 +669,14 @@ func subscribeMemoryStatusHandler(nc *nats.Conn, vignoble string) error {
 			if lastRollup != "" && (resp.Wiki.LastRollup == "" || lastRollup > resp.Wiki.LastRollup) {
 				resp.Wiki.LastRollup = lastRollup
 			}
+			gitOk, lastCommit := readWikiCommitSentinel(reqVignoble, gid)
 			resp.Wiki.Groups = append(resp.Wiki.Groups, wikiGroupStats{
-				Group:       gid,
-				Docs:        wiki.TotalDocs,
-				AutoServe:   wiki.AutoServe,
-				NeedsReview: wiki.NeedsReview,
+				Group:          gid,
+				Docs:           wiki.TotalDocs,
+				AutoServe:      wiki.AutoServe,
+				NeedsReview:    wiki.NeedsReview,
+				GitPublishOk:   gitOk,
+				LastWikiCommit: lastCommit,
 			})
 		}
 
@@ -918,6 +923,48 @@ func chunkWikiBody(title, body string) []wikiChunk {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// readWikiCommitSentinel reads the .wiki_commit_ts sentinel written by the
+// curator after a successful push. Returns (true, timestamp) if the sentinel
+// exists and is readable, (false, "") otherwise.
+func readWikiCommitSentinel(vignoble, groupID string) (bool, string) {
+	base := os.Getenv("VIGNOBLES_BASE_DIR")
+	if base == "" {
+		base = os.Getenv("WIKI_CLONE_DIR")
+	}
+	if base == "" {
+		return false, ""
+	}
+	// Try vignoble-<name> then bare name.
+	var sentinelPath string
+	for _, cand := range []string{
+		filepath.Join(base, "vignoble-"+vignoble, "wiki", groupID, ".wiki_commit_ts"),
+		filepath.Join(base, vignoble, "wiki", groupID, ".wiki_commit_ts"),
+	} {
+		if _, err := os.Stat(cand); err == nil {
+			sentinelPath = cand
+			break
+		}
+	}
+	if sentinelPath == "" {
+		// Also try VIGNOBLE_DIR (single-vignoble mode).
+		if dir := os.Getenv("VIGNOBLE_DIR"); dir != "" {
+			cand := filepath.Join(dir, "wiki", groupID, ".wiki_commit_ts")
+			if _, err := os.Stat(cand); err == nil {
+				sentinelPath = cand
+			}
+		}
+	}
+	if sentinelPath == "" {
+		return false, ""
+	}
+	raw, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		return false, ""
+	}
+	timestamp := strings.TrimSpace(string(raw))
+	return true, timestamp
+}
 
 // resolveGroupIDsForVignoble returns group_ids scoped to a single vignoble
 // (for the status view). When VIGNOBLES_BASE_DIR is set it reads only

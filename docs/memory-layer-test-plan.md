@@ -130,7 +130,7 @@ Stages 1–4, 6, 7 need **no** LLM and can run while logged out.
 - [ ] In the test vignoble: `/teaching` a recipe → session-end episode → ingester extracts.
 - [ ] Boot a new worker for the same `group_id` → recall injects the recipe at boot.
 - [ ] Per-turn recall query returns relevant context; `/lesson` one-shot pin works.
-- **Pass:** teach-once / recall-later loop works end to end (GWASDB reference scenario).
+- **Pass:** teach-once / recall-later loop works end to end (genomics reference scenario).
 
 ## D. Exit criteria (→ open `cuvee/memory → master`)
 

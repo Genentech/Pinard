@@ -11,6 +11,7 @@ node_modules/
 /aoc
 /cmd/aoc/aoc
 bin/aoc
+/BUILD_INFO
 
 # Distribution build artifacts (produced by `make dist` / build-sif.sh)
 dist/stage/

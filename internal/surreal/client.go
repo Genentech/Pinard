@@ -692,20 +692,24 @@ func (c *Client) LookupWiki(text string, limit int, includeNeedsReview bool) ([]
 	return c.queryOne(sql, map[string]any{"text": text, "limit": limit})
 }
 
-// UpsertWikiDoc upserts a wiki document.
+// UpsertWikiDoc upserts a wiki document. The top-level `type` field mirrors
+// frontmatter["type"] (the entity role, e.g. "decision") so the role-scoped
+// dedup query (FindSimilarWikiDoc) can filter without unpacking the FLEXIBLE
+// frontmatter object (#265).
 func (c *Client) UpsertWikiDoc(title, body, path, summary string, confidence float64, frontmatter map[string]any, embedding []float64) (map[string]any, error) {
 	status := "auto_serve"
 	if confidence < 0.7 {
 		status = "needs_review"
 	}
 	rid := fmt.Sprintf("%x", sha256.Sum256([]byte("wiki_doc\x00"+path)))[:32]
+	role, _ := frontmatter["type"].(string)
 	sql := `UPSERT type::record('wiki_doc',$rid) SET
-title=type::string($title),body=type::string($body),
+title=type::string($title),type=type::string($role),body=type::string($body),
 summary=type::string($summary),frontmatter=$frontmatter,
 path=type::string($path),confidence=$confidence,
 status=type::string($status),updated_at=time::now()`
 	vars := map[string]any{
-		"rid": rid, "title": title, "body": body, "summary": summary,
+		"rid": rid, "title": title, "role": role, "body": body, "summary": summary,
 		"frontmatter": orEmpty(frontmatter), "path": path,
 		"confidence": confidence, "status": status,
 	}
@@ -1028,12 +1032,13 @@ func (c *Client) FetchEntitiesSinceCursor(since *time.Time) ([]map[string]any, e
 }
 
 // FindSimilarWikiDoc returns the path and cosine score of the most similar
-// existing wiki_doc, or ("", 0, nil) when none exceeds the threshold.
-func (c *Client) FindSimilarWikiDoc(embedding []float64) (string, float64, error) {
+// existing wiki_doc with the same role, or ("", 0, nil) when none exceeds the
+// threshold. Scoped by role (#265) to avoid cross-role false positives.
+func (c *Client) FindSimilarWikiDoc(role string, embedding []float64) (string, float64, error) {
 	sql := `SELECT path, vector::similarity::cosine(embedding, $vec) AS score ` +
-		`FROM wiki_doc WHERE embedding IS NOT NULL ` +
+		`FROM wiki_doc WHERE embedding IS NOT NULL AND type=$role ` +
 		`ORDER BY score DESC LIMIT 1`
-	rows, err := c.queryOne(sql, map[string]any{"vec": embedding})
+	rows, err := c.queryOne(sql, map[string]any{"vec": embedding, "role": role})
 	if err != nil {
 		return "", 0, err
 	}
@@ -1121,5 +1126,3 @@ func strVal(m map[string]any, key string) string {
 	v, _ := m[key].(string)
 	return v
 }
-
-

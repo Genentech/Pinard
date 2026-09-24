@@ -23,7 +23,7 @@ describe("Contract: Worker notification channel (aoc_notify → NATS → conduct
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("notification published to NATS is delivered to conductor LLM", async () => {

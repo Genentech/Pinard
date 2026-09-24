@@ -53,7 +53,14 @@ else
   echo "  ✓ Pi $PI_CUR (>= $PI_REQ)"
 fi
 
-# 2. Build and install Go binary
+# 2. Build provenance + install Go binary. BUILD_INFO is the single source of
+# truth (scripts/build-info.sh, shared with dist/build.sh and cmd/aoc/Makefile)
+# — written at the repo root so `aoc --version` / `bin/pinard` have a fallback
+# on a source checkout without a full `make dist`.
+bash "$REPO_DIR/scripts/build-info.sh" "$REPO_DIR/BUILD_INFO"
+# shellcheck disable=SC1091
+source "$REPO_DIR/BUILD_INFO"
+
 echo "  Building aoc..."
 mkdir -p "$HOME/.local/bin"
 # Genentech-specific capsule/Mnemosyne funding is gated behind the `capsule`
@@ -61,7 +68,9 @@ mkdir -p "$HOME/.local/bin"
 # export drops the capsule source, so this builds tag-less automatically.
 BUILD_TAGS=""
 [ -f "$REPO_DIR/cmd/aoc/cmd_capsule.go" ] && BUILD_TAGS="-tags capsule"
-(cd "$REPO_DIR" && CGO_ENABLED=0 go build $BUILD_TAGS -o "$HOME/.local/bin/aoc" ./cmd/aoc/)
+(cd "$REPO_DIR" && CGO_ENABLED=0 go build $BUILD_TAGS \
+    -ldflags "-X main.version=$TAG -X main.commit=$COMMIT_SHORT -X main.buildDate=$BUILT_AT" \
+    -o "$HOME/.local/bin/aoc" ./cmd/aoc/)
 echo "  ✓ ~/.local/bin/aoc${BUILD_TAGS:+ (with capsule)}"
 
 # 3. Symlink pinard launcher and picker

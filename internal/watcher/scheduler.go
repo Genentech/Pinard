@@ -133,7 +133,7 @@ func (s *Scheduler) spawn(sched *config.Schedule) error {
 	// name is stable within one period (a double-fire is correctly skipped) but
 	// unique across periods. aoc uses --name verbatim (no random suffix).
 	name := fmt.Sprintf("%s-%s-%s", s.Vignoble.Name, sanitizeName(sched.Name), cron.PeriodSuffix(sched.Cron, time.Now()))
-	args := []string{"spawn", "--project", sched.Project, "--name", name}
+	args := []string{"spawn", "--project", sched.Project, "--name", name, "--ephemeral"}
 	// Base the worktree on the vigne's default branch (mirrors the issue
 	// watcher). Without this, aoc spawn falls back to "main"/"origin/main",
 	// which breaks scheduled spawns on repos whose default branch isn't main.

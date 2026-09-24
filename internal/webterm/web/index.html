@@ -65,16 +65,17 @@
       const st = stText ? `<span class="st">${stText}</span>` : "";
       const remoteBadge = e.remote ? `<span class="st" title="remote — attach via self-served responder">🌐</span>` : "";
       const unreachableBadge = e.unreachable ? `<span class="st" title="local — responder unavailable">⚠️</span>` : "";
+      const buildBadge = e.build ? `<span class="st" title="build ${esc(e.build)}">🏷️</span>` : "";
       if (e.remote) {
         return `<a class="row" href="${termLink(v, e.target)}" target="_blank" rel="noopener">
-          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${remoteBadge}</a>`;
+          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${remoteBadge}${buildBadge}</a>`;
       }
       if (e.unreachable) {
         return `<div class="row" style="opacity:.6">
-          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${unreachableBadge}</div>`;
+          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${unreachableBadge}${buildBadge}</div>`;
       }
       return `<a class="row" href="${termLink(v, e.target)}" target="_blank" rel="noopener">
-        <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}</a>`;
+        <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${buildBadge}</a>`;
     }
 
     async function showVignoble(v){

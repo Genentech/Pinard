@@ -54,7 +54,7 @@ Pinard's memory is **local-first, curated, and portable**:
 ### Memory services (Go native binaries)
 
 The memory layer is implemented as three Go binaries, deployed together inside the
-`pinard-services` image (or as standalone processes on any host):
+`pinard-solo` or `pinard-backend` images (or as standalone processes on any host):
 
 | Binary | Role |
 |--------|------|
@@ -63,7 +63,8 @@ The memory layer is implemented as three Go binaries, deployed together inside t
 | `memory-rollup` | Compacts and summarizes accumulated episodic records to keep the store manageable. |
 
 All three are Go binaries with no Python runtime dependency. They ship natively for
-Linux (inside `pinard-services`) and build for any platform where Go is available.
+Linux (inside `pinard-solo`/`pinard-backend`) and build for any platform where Go is
+available.
 See [The Layered Memory Architecture](/docs/memory-architecture/) for the full
 SurrealDB schema and layer semantics.
 

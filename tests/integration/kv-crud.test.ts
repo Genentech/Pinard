@@ -9,7 +9,7 @@ describe("KV bucket CRUD operations", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("put and get a value", async () => {

@@ -30,7 +30,7 @@ describe("Contract: deliver_policy 'all' replays unacked messages on restart (TH
 
       await conductor.cleanup();
     } finally {
-      await infra.cleanup();
+      if (infra) await infra.cleanup();
     }
   });
 

@@ -108,7 +108,7 @@ func TestObsToRoleNameTruncatesLongContent(t *testing.T) {
 
 // ── ingestObservation — upsert path ──────────────────────────────────────────
 
-func mockRosettaServer(t *testing.T, dim int) *httptest.Server {
+func mockEmbeddingServer(t *testing.T, dim int) *httptest.Server {
 	t.Helper()
 	vec := make([]float64, dim)
 	for i := range vec {
@@ -144,9 +144,9 @@ func mockSurrealServer(t *testing.T, results []map[string]any) *httptest.Server 
 }
 
 func TestIngestObservationUpsertPath(t *testing.T) {
-	rosetta := mockRosettaServer(t, surreal.EmbeddingDim)
-	defer rosetta.Close()
-	t.Setenv("ROSETTA_URL", rosetta.URL)
+	embedding := mockEmbeddingServer(t, surreal.EmbeddingDim)
+	defer embedding.Close()
+	t.Setenv("EMBEDDING_URL", embedding.URL)
 
 	upserted := false
 	surrealSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -168,7 +168,7 @@ func TestIngestObservationUpsertPath(t *testing.T) {
 	}))
 	defer surrealSrv.Close()
 
-	emb := memory.NewEmbedder() // picks up ROSETTA_URL from env
+	emb := memory.NewEmbedder() // picks up EMBEDDING_URL from env
 	db, err := surreal.NewWithConfig("test-group", surrealSrv.URL, "u", "p")
 	if err != nil {
 		t.Fatal(err)
@@ -190,8 +190,8 @@ func TestIngestObservationUpsertPath(t *testing.T) {
 }
 
 func TestIngestObservationUnknownRoleGoesToStaging(t *testing.T) {
-	rosetta := mockRosettaServer(t, surreal.EmbeddingDim)
-	defer rosetta.Close()
+	embedding := mockEmbeddingServer(t, surreal.EmbeddingDim)
+	defer embedding.Close()
 
 	var capturedSQL string
 	surrealSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +216,7 @@ func TestIngestObservationUnknownRoleGoesToStaging(t *testing.T) {
 
 	// Use a registry with no domain extension — compose for "test-group" gives core only.
 	// We force an unknown obs_type that maps to a role not in the ontology.
-	t.Setenv("ROSETTA_URL", rosetta.URL)
+	t.Setenv("EMBEDDING_URL", embedding.URL)
 	emb := memory.NewEmbedder()
 	db, _ := surreal.NewWithConfig("test-group", surrealSrv.URL, "u", "p")
 	r, _ := ontology.NewRegistry()
@@ -442,8 +442,8 @@ func TestEngramReaderAndIngestionEndToEnd(t *testing.T) {
 	}))
 	defer engramSrv.Close()
 
-	rosetta := mockRosettaServer(t, surreal.EmbeddingDim)
-	defer rosetta.Close()
+	embedding := mockEmbeddingServer(t, surreal.EmbeddingDim)
+	defer embedding.Close()
 
 	var upsertCalls int
 	surrealSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -469,7 +469,7 @@ func TestEngramReaderAndIngestionEndToEnd(t *testing.T) {
 		t.Fatalf("expected 1 obs, got %d", len(observations))
 	}
 
-	t.Setenv("ROSETTA_URL", rosetta.URL)
+	t.Setenv("EMBEDDING_URL", embedding.URL)
 	emb := memory.NewEmbedder()
 	db, _ := surreal.NewWithConfig("e2e-group", surrealSrv.URL, "u", "p")
 	r, _ := ontology.NewRegistry()

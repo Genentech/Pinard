@@ -25,21 +25,57 @@ import (
 
 // aoc resolve-model — resolve a tier (sonnet|opus|haiku) or model ID to the concrete
 // model ID from ~/.claude/settings.json. With --role/--project, derive the tier from
-// vignes.yaml first. With --models-list, print the conductor's proxy/<id>,... list.
+// vignes.yaml first. With --models-list, print the conductor's <provider>/<id>,... list.
+// With --provider, print only the configured provider name.
 var resolveModelCmd = &cobra.Command{
 	Use:   "resolve-model [tier-or-id]",
 	Short: "Resolve a model tier to its concrete model ID (from ~/.claude/settings.json)",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --provider: emit the configured provider name and exit.
+		providerFlag, _ := cmd.Flags().GetBool("provider")
+		if providerFlag {
+			vb, err := config.ResolveVignoble()
+			if err != nil {
+				// No vignoble (e.g. standalone worker): default to proxy.
+				fmt.Println("proxy")
+				return nil
+			}
+			fmt.Println(vb.Config.Models.ProviderName())
+			return nil
+		}
+
 		modelsList, _ := cmd.Flags().GetBool("models-list")
 		if modelsList {
-			opus, sonnet, haiku := config.SettingsModels()
-			var parts []string
-			for _, id := range []string{opus, sonnet, haiku} {
-				if id != "" {
-					parts = append(parts, "proxy/"+id)
+			// Resolve the provider to determine the prefix and model source.
+			provider := "proxy"
+			var providerModels []string
+			if vb, err := config.ResolveVignoble(); err == nil {
+				provider = vb.Config.Models.ProviderName()
+			}
+			if provider == "proxy" {
+				// Proxy: use ~/.claude/settings.json Anthropic tier IDs.
+				opus, sonnet, haiku := config.SettingsModels()
+				for _, id := range []string{opus, sonnet, haiku} {
+					if id != "" {
+						providerModels = append(providerModels, provider+"/"+id)
+					}
+				}
+			} else {
+				// Non-proxy provider: use explicitly configured conductor + worker IDs.
+				if vb, err := config.ResolveVignoble(); err == nil {
+					seen := map[string]bool{}
+					for _, id := range []string{
+						vb.Config.Models.Conductor.ID,
+						vb.Config.Models.Worker.ID,
+					} {
+						if id != "" && !seen[id] {
+							seen[id] = true
+							providerModels = append(providerModels, provider+"/"+id)
+						}
+					}
 				}
 			}
-			fmt.Println(strings.Join(parts, ","))
+			fmt.Println(strings.Join(providerModels, ","))
 			return nil
 		}
 
@@ -85,6 +121,11 @@ var resolveModelCmd = &cobra.Command{
 			}
 		}
 
+		// For non-proxy providers, model IDs are concrete — skip tier resolution.
+		if vb, err := config.ResolveVignoble(); err == nil && vb.Config.Models.ProviderName() != "proxy" {
+			fmt.Println(config.StripThinkingSuffix(want))
+			return nil
+		}
 		fmt.Println(config.ResolveModelTier(want))
 		return nil
 	},
@@ -246,6 +287,18 @@ var envExportsCmd = &cobra.Command{
 			emit("OPENAI_API_KEY", v)
 		}
 
+		// LLM provider config from vignes.yaml: let bin/pinard consume these
+		// without an extra aoc call. Defaults (proxy/anthropic-messages) are emitted
+		// so the launcher always has a defined value to switch on.
+		providerName := "proxy"
+		apiTypeName := "anthropic-messages"
+		if vb, verr := config.ResolveVignoble(); verr == nil {
+			providerName = vb.Config.Models.ProviderName()
+			apiTypeName = vb.Config.Models.APIType()
+		}
+		emit("PINARD_PROVIDER", providerName)
+		emit("PINARD_PROVIDER_API", apiTypeName)
+
 		return nil
 	},
 }
@@ -255,18 +308,23 @@ func shquote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// aoc ensure-proxy-provider — make pi aware of the LLM proxy provider at startup.
+// aoc ensure-proxy-provider — make pi aware of the LLM provider at startup.
 // pi reads the provider registry from ~/.pi/agent/models.json; a sandboxed worker
-// (singularity --containall) starts with an empty ~/.pi, so pi has no "proxy"
-// provider and `--models proxy/<id>` resolves to nothing ("No models available").
+// (singularity --containall) starts with an empty ~/.pi, so the provider is
+// unknown at startup and `--models <provider>/<id>` resolves to nothing.
 //
-// Sources tried in order:
+// For the default proxy provider, sources tried in order:
 //  1. ~/.claude/settings.json (backward-compatible; mounts on non-sandboxed hosts)
 //  2. Image-baked defaults: PINARD_PROXY_BASE_URL + PINARD_PROXY_HEADERS env vars,
 //     token minted from PINARD_CAPSULE_CONTRACT (capsule-funded runs) or
 //     PINARD_POUR_URL (sandboxed --containall workers).
 //
-// Idempotent: if models.json already defines a proxy provider, it is left as-is.
+// For non-proxy providers (openai, deepseek, …), a minimal entry is written with
+// the configured API type; no token is seeded (the provider reads its key from the
+// standard env var, e.g. OPENAI_API_KEY).
+//
+// Idempotent: if models.json already defines the target provider, it is left as-is.
+// Flags: --provider <name>, --api <type> (override vignes.yaml defaults).
 var ensureProxyProviderCmd = &cobra.Command{
 	Use:   "ensure-proxy-provider",
 	Short: "Seed ~/.pi/agent/{models,auth}.json from settings.json or baked defaults + PINARD_POUR_URL",
@@ -285,6 +343,30 @@ var ensureProxyProviderCmd = &cobra.Command{
 		}
 		os.MkdirAll(agentDir, 0o755)
 
+		// Resolve provider name and API type: flags > vignes.yaml > defaults.
+		providerName, _ := cmd.Flags().GetString("provider")
+		apiType, _ := cmd.Flags().GetString("api")
+		if providerName == "" || apiType == "" {
+			if vb, verr := config.ResolveVignoble(); verr == nil {
+				if providerName == "" {
+					providerName = vb.Config.Models.ProviderName()
+				}
+				if apiType == "" {
+					apiType = vb.Config.Models.APIType()
+				}
+			}
+		}
+		if providerName == "" {
+			providerName = "proxy"
+		}
+		if apiType == "" {
+			if providerName == "proxy" {
+				apiType = "anthropic-messages"
+			} else {
+				apiType = "openai-responses"
+			}
+		}
+
 		// Load existing models.json (may be empty/absent).
 		modelsPath := filepath.Join(agentDir, "models.json")
 		models := map[string]any{}
@@ -296,12 +378,27 @@ var ensureProxyProviderCmd = &cobra.Command{
 			providers = map[string]any{}
 		}
 
-		// Idempotent: proxy provider already configured — nothing to do.
-		if _, ok := providers["proxy"]; ok {
+		// Idempotent: target provider already configured — nothing to do.
+		if _, ok := providers[providerName]; ok {
 			return nil
 		}
 
-		// --- Source 1: ~/.claude/settings.json (backward-compatible) ---
+		// --- Non-proxy provider: write a minimal entry and exit (no token seeding). ---
+		if providerName != "proxy" {
+			providers[providerName] = map[string]any{
+				"api": apiType,
+			}
+			models["providers"] = providers
+			out, _ := json.MarshalIndent(models, "", " ")
+			if os.WriteFile(modelsPath, out, 0o644) == nil {
+				fmt.Fprintf(os.Stderr, "[aoc] seeded %s provider (%s) in %s\n", providerName, apiType, modelsPath)
+			}
+			return nil
+		}
+
+		// --- Proxy provider: requires a base URL and token. ---
+
+		// Source 1: ~/.claude/settings.json (backward-compatible)
 		var settings struct {
 			APIKeyHelper string            `json:"apiKeyHelper"`
 			Env          map[string]string `json:"env"`
@@ -317,7 +414,7 @@ var ensureProxyProviderCmd = &cobra.Command{
 			rawHeaders = settings.Env["ANTHROPIC_CUSTOM_HEADERS"]
 			helperCmd = settings.APIKeyHelper
 		} else {
-			// --- Source 2: image-baked env var defaults + PINARD_POUR_URL ---
+			// Source 2: image-baked env var defaults + PINARD_POUR_URL
 			baseURL = os.Getenv("PINARD_PROXY_BASE_URL")
 			rawHeaders = os.Getenv("PINARD_PROXY_HEADERS")
 			// helperCmd stays empty; token will be fetched via PINARD_POUR_URL below.
@@ -327,7 +424,7 @@ var ensureProxyProviderCmd = &cobra.Command{
 			return nil // nothing configured — skip silently
 		}
 
-		// Build the provider entry.
+		// Build the proxy provider entry.
 		headers := map[string]string{}
 		if rawHeaders != "" {
 			for _, part := range strings.Split(rawHeaders, ",") {
@@ -338,7 +435,7 @@ var ensureProxyProviderCmd = &cobra.Command{
 		}
 		providers["proxy"] = map[string]any{
 			"baseUrl":    baseURL,
-			"api":        "anthropic-messages",
+			"api":        apiType,
 			"authHeader": true,
 			"headers":    headers,
 		}
@@ -459,9 +556,12 @@ func jwtExpMs(token string) int64 {
 
 func init() {
 	rootCmd.AddCommand(ensureProxyProviderCmd)
+	ensureProxyProviderCmd.Flags().String("provider", "", "LLM provider name (overrides vignes.yaml models.provider)")
+	ensureProxyProviderCmd.Flags().String("api", "", "pi provider API type (overrides vignes.yaml models.api)")
 	resolveModelCmd.Flags().String("role", "", "Derive tier from config: worker|conductor")
 	resolveModelCmd.Flags().String("project", "", "Project (for --role worker)")
-	resolveModelCmd.Flags().Bool("models-list", false, "Print conductor proxy/<id>,... models list")
+	resolveModelCmd.Flags().Bool("models-list", false, "Print conductor <provider>/<id>,... models list")
+	resolveModelCmd.Flags().Bool("provider", false, "Print the configured provider name from vignes.yaml")
 	rootCmd.AddCommand(resolveModelCmd)
 
 	vigneArgsCmd.Flags().String("project", "", "Vigne/project name (required)")

@@ -27,10 +27,10 @@ func loadClaudeSettings() claudeSettings {
 	return s
 }
 
-// stripThinkingSuffix removes a trailing "[Nm]" thinking marker (e.g.
+// StripThinkingSuffix removes a trailing "[Nm]" thinking marker (e.g.
 // "claude-sonnet-4-6[1m]" -> "claude-sonnet-4-6"). The proxy provider configures
 // thinking separately, so model IDs must not carry the suffix.
-func stripThinkingSuffix(id string) string {
+func StripThinkingSuffix(id string) string {
 	if i := strings.IndexByte(id, '['); i >= 0 {
 		return id[:i]
 	}
@@ -46,10 +46,10 @@ func ResolveModelTier(tier string) string {
 	case "sonnet", "opus", "haiku":
 		key := "ANTHROPIC_DEFAULT_" + strings.ToUpper(tier) + "_MODEL"
 		s := loadClaudeSettings()
-		return stripThinkingSuffix(s.Env[key])
+		return StripThinkingSuffix(s.Env[key])
 	default:
 		// Not a tier — assume it's already a model ID.
-		return stripThinkingSuffix(tier)
+		return StripThinkingSuffix(tier)
 	}
 }
 
@@ -57,7 +57,7 @@ func ResolveModelTier(tier string) string {
 // any tier without a configured model), for building the conductor's --models list.
 func SettingsModels() (opus, sonnet, haiku string) {
 	s := loadClaudeSettings()
-	return stripThinkingSuffix(s.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"]),
-		stripThinkingSuffix(s.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"]),
-		stripThinkingSuffix(s.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
+	return StripThinkingSuffix(s.Env["ANTHROPIC_DEFAULT_OPUS_MODEL"]),
+		StripThinkingSuffix(s.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"]),
+		StripThinkingSuffix(s.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
 }

@@ -205,6 +205,9 @@ auto_merge: false             # optional; off by default (humans merge). Overrid
 auto_review: true             # optional; on by default (maître reviews every green MR). Override per-vigne.
 
 models:
+  # provider / api: optional. Default is the Anthropic proxy (no change for
+  # existing setups). Set provider: openai or provider: deepseek to drive pi
+  # against that provider directly — see "Custom LLM provider" below.
   conductor:
     id: claude-opus-4-6
   worker:
@@ -234,6 +237,59 @@ vignes:
 
 Edit `vignes.yaml` directly, or use `aoc add vigne` and `aoc config set`. The daemon
 hot-reloads on change.
+
+### `models` fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | string | `proxy` | LLM provider: `proxy` (Anthropic proxy), `openai`, `deepseek`, or any pi-supported provider |
+| `api` | string | provider-dependent | pi provider API type. Defaults to `anthropic-messages` for `proxy`, `openai-responses` for all others |
+| `conductor.id` | string | `opus` tier | Concrete model ID for the conductor/régisseur |
+| `worker.id` | string | `sonnet` tier | Default model ID for vendangeur workers |
+
+See [Custom LLM provider](#custom-llm-provider-openai--deepseek) below for a full walkthrough.
+
+## Custom LLM provider (OpenAI / DeepSeek)
+
+Pinard’s underlying agent (`pi`) is model-agnostic. By default Pinard launches with
+`--provider proxy`, routing through your Anthropic proxy. To drive OpenAI or DeepSeek
+directly, set `models.provider` in `vignes.yaml`:
+
+```yaml
+# OpenAI
+models:
+  provider: openai           # passes --provider openai to pi
+  # api: openai-responses    # default for non-proxy providers; explicit override optional
+  conductor:
+    id: gpt-4o
+  worker:
+    id: gpt-4o-mini
+```
+
+```yaml
+# DeepSeek
+models:
+  provider: deepseek
+  conductor:
+    id: deepseek-reasoner
+  worker:
+    id: deepseek-chat
+```
+
+Then set the provider’s API key in `~/.config/pinard/env`:
+
+```bash
+# ~/.config/pinard/env
+OPENAI_API_KEY=sk-...
+# or
+# DEEPSEEK_API_KEY=...
+```
+
+Pinard’s `aoc env-exports` passes these through to pi, which picks them up via
+its standard env-var resolution for each provider.
+
+**Backward-compatible**: existing vignobles with no `models.provider` field are
+unchanged — they continue to use `provider: proxy` and the Anthropic proxy path.
 
 ## Pressoir — git host
 
@@ -377,6 +433,9 @@ memory:
                         # Leave empty (default) for full auto-discovery from cloud_mutations
                         # (postgres source) or vignes.yaml (http source).
                         # Set to restrict ingest to a subset during debugging or testing.
+    embeddingUrl: "https://embeddings.example.com"   # embedding service URL (was rosettaUrl)
+    llmTokenUrl: ""     # pour-URL for MEMORY_LLM_AUTH=url (single token endpoint)
+    llmTokenUrls: []    # pour-URLs for round-robin token fetching; overrides llmTokenUrl
   recall:
     enabled: true       # Deploy the memory-recall Go binary as a separate workload.
     resources: {}       # Pod resource requests/limits (cpu/memory).
@@ -403,6 +462,10 @@ These are set by the Helm chart and control the ingester/curator/rollup engine a
 | `VIGNOBLES_BASE_DIR` | **Required.** Parent dir of multiple vignoble clones. The memory service fails fast at startup if this is unset or the path does not exist. The rollup engine and wiki curator iterate all `vignoble-<name>/` subdirs automatically. |
 | `GLOBAL_WIKI_ROOT` | Filesystem path to the cloned global `pinard-wiki` repo. Used by the curator and inbound sync. |
 | `MEMORY_GROUP_IDS` | Comma-separated group IDs to ingest. **Optional** — when unset the ingester auto-discovers all groups from the postgres `cloud_mutations` table (or vignes.yaml for the http source). Set to a subset only when debugging or restricting scope temporarily. |
+| `EMBEDDING_URL` | Base URL for the vector embedding service (default: `https://embeddings.example.com`). Replaces the deprecated `ROSETTA_URL`. |
+| `ROSETTA_URL` | **Deprecated alias** for `EMBEDDING_URL`. Honored for one release cycle with a deprecation log line; switch to `EMBEDDING_URL`. |
+| `MEMORY_TOKEN_URL` | Single pour-URL for `MEMORY_LLM_AUTH=url` token fetching. |
+| `MEMORY_TOKEN_URLS` | Comma-separated pour-URLs for round-robin token fetching; overrides `MEMORY_TOKEN_URL` when set. Improves reliability when multiple token endpoints are available. |
 | `PINARD_ONTOLOGY_DIRS` | Colon-separated directories to scan for domain ontology YAML files (`*.yaml`/`*.yml`/`*.json`). Combined with `<vignoble>/pinard/ontology/*.yaml` auto-discovery. Missing directories are non-fatal (logged warning). |
 
 All variables are derived from Helm values by the chart.

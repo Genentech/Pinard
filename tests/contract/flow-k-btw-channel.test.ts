@@ -24,7 +24,7 @@ describe("Contract: BTW channel (parallel questions with auto-reply)", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("conductor sends btw, worker publishes btw_reply, conductor receives it", async () => {

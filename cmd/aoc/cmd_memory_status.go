@@ -48,10 +48,12 @@ type memStatusWiki struct {
 }
 
 type memStatusWikiGroup struct {
-	Group       string `json:"group"`
-	Docs        int64  `json:"docs"`
-	AutoServe   int64  `json:"auto_serve"`
-	NeedsReview int64  `json:"needs_review"`
+	Group          string `json:"group"`
+	Docs           int64  `json:"docs"`
+	AutoServe      int64  `json:"auto_serve"`
+	NeedsReview    int64  `json:"needs_review"`
+	GitPublishOk   bool   `json:"git_publish_ok"`
+	LastWikiCommit string `json:"last_wiki_commit,omitempty"`
 }
 
 var memoryStatusCmd = &cobra.Command{
@@ -130,9 +132,14 @@ func printMemoryStatus(resp memoryStatusResponse) {
 
 	// Wiki section
 	fmt.Fprintln(w, "\n=== Wiki curation ===")
-	fmt.Fprintf(w, "GROUP\tDOCS\tAUTO_SERVE\tNEEDS_REVIEW\n")
+	fmt.Fprintf(w, "GROUP\tDOCS\tAUTO_SERVE\tNEEDS_REVIEW\tGIT_PUBLISHED\tLAST_COMMIT\n")
 	for _, g := range resp.Wiki.Groups {
-		fmt.Fprintf(w, "%s\t%d\t%d\t%d\n", g.Group, g.Docs, g.AutoServe, g.NeedsReview)
+		published := "✓"
+		if !g.GitPublishOk {
+			published = "✗ not published"
+		}
+		lastCommit := fmtAge(g.LastWikiCommit)
+		fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%s\t%s\n", g.Group, g.Docs, g.AutoServe, g.NeedsReview, published, lastCommit)
 	}
 	w.Flush()
 
@@ -160,10 +167,22 @@ func fmtAge(ts string) string {
 	}
 }
 
+// wikiNotPublished reports whether any group has wiki docs in SurrealDB that
+// have never been committed/pushed to the vignoble repo.
+func wikiNotPublished(resp memoryStatusResponse) bool {
+	for _, g := range resp.Wiki.Groups {
+		if g.Docs > 0 && !g.GitPublishOk {
+			return true
+		}
+	}
+	return false
+}
+
 func verdictLine(resp memoryStatusResponse) string {
-	// Health = ingest pipelines working. needs_review is a human backlog, not a
-	// health signal, so it never drives the verdict (matches the pi-extension token).
-	if resp.SurrealDB.TotalLag == 0 && resp.SurrealDB.TotalFailed == 0 {
+	// Health = ingest pipelines working + wiki docs are committed/pushed.
+	// needs_review is a human backlog, not a health signal.
+	wikiUnpublished := wikiNotPublished(resp)
+	if resp.SurrealDB.TotalLag == 0 && resp.SurrealDB.TotalFailed == 0 && !wikiUnpublished {
 		return "memory: ✓ ok"
 	}
 	msg := "memory: ⚠"
@@ -178,12 +197,16 @@ func verdictLine(resp memoryStatusResponse) string {
 	}
 	if resp.SurrealDB.TotalFailed > 0 {
 		msg += sep + fmt.Sprintf("%d failed writes", resp.SurrealDB.TotalFailed)
+		sep = " · "
+	}
+	if wikiUnpublished {
+		msg += sep + "wiki: not published"
 	}
 	return msg
 }
 
 func verdictExit(resp memoryStatusResponse) error {
-	if resp.SurrealDB.TotalLag > 0 || resp.SurrealDB.TotalFailed > 0 {
+	if resp.SurrealDB.TotalLag > 0 || resp.SurrealDB.TotalFailed > 0 || wikiNotPublished(resp) {
 		os.Exit(1)
 	}
 	return nil

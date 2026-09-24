@@ -6,12 +6,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os/user"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
+
+// tmuxSocketPath returns the filesystem path of the named tmux socket so tests
+// can remove the socket file after kill-server to avoid polluting /tmp/tmux-<uid>/.
+func tmuxSocketPath(name string) string {
+	u, err := user.Current()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join("/tmp", "tmux-"+u.Uid, name)
+}
 
 func startEmbeddedNATS(t *testing.T) (*server.Server, string) {
 	t.Helper()

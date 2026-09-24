@@ -9,7 +9,7 @@ describe("Contract: Worker state in KV is readable by conductor", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("worker publishes state to KV and it's readable", async () => {

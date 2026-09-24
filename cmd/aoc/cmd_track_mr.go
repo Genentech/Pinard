@@ -114,6 +114,66 @@ func resolveAgentRecord(kv pnats.KVReader, token string) map[string]any {
 	return nil
 }
 
+// registerWatchedMR inserts or updates the WatchedMR entry for sessionName
+// in s.Watched, enforcing (repo, MR) uniqueness. A single logical agent can
+// call `aoc track-mr` under two different identities — e.g. the
+// issue-driven runID ("pinard-swe-<issue>") and the actual tmux/session
+// name ("<parcelle>--<project>-<hash>") — which would otherwise create two
+// independent WatchedMR entries, each with its own ReviewedSHA/State,
+// causing duplicate review/merge dispatch (issue #308). If an entry for the
+// same (repo, mr) already exists — under sessionName itself, or under a
+// different key entirely — its routing fields are refreshed in place
+// instead. Returns true only when a brand-new WatchedMR entry was created.
+func registerWatchedMR(s *state.MRWatcherState, sessionName, project, repo string, mr int, entryParcelle, entryProcess string) bool {
+	if s.Watched == nil {
+		s.Watched = make(map[string]*state.WatchedMR)
+	}
+
+	refreshRouting := func(existing *state.WatchedMR) {
+		existing.Project = project
+		existing.Repo = repo
+		if entryParcelle != "" {
+			existing.Parcelle = entryParcelle
+		}
+		if entryProcess != "" {
+			existing.ProcessName = entryProcess
+		}
+		existing.LastChecked = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	// Re-tracking under the same key: refresh in place. Must NOT reset
+	// LastNoteID/ReviewedSHA — that would re-dispatch every prior review
+	// comment, causing a feedback loop.
+	if existing, ok := s.Watched[sessionName]; ok && existing.MR == mr {
+		refreshRouting(existing)
+		return false
+	}
+
+	// Same (repo, mr) already tracked under a different key: merge the
+	// newer call's routing data into the existing entry instead of creating
+	// a second one — refusing to split review/pipeline/merge state across
+	// two independent gates.
+	for key, existing := range s.Watched {
+		if key == sessionName || existing.Repo != repo || existing.MR != mr {
+			continue
+		}
+		refreshRouting(existing)
+		return false
+	}
+
+	s.Watched[sessionName] = &state.WatchedMR{
+		Name:        sessionName,
+		Project:     project,
+		Repo:        repo,
+		Parcelle:    entryParcelle,
+		ProcessName: entryProcess,
+		MR:          mr,
+		LastNoteID:  0,
+		LastChecked: time.Now().UTC().Format(time.RFC3339),
+	}
+	return true
+}
+
 var trackMRCmd = &cobra.Command{
 	Use:   "track-mr",
 	Short: "Register a MR with the watcher for comment forwarding",
@@ -233,36 +293,7 @@ var trackMRCmd = &cobra.Command{
 
 		isNewTracking := false
 		mrState.Update(func(s *state.MRWatcherState) {
-			if s.Watched == nil {
-				s.Watched = make(map[string]*state.WatchedMR)
-			}
-			// Preserve existing tracking state if this MR is already tracked —
-			// re-tracking the same MR must NOT reset LastNoteID (that would
-			// re-dispatch every prior review comment, causing a feedback loop).
-			if existing, ok := s.Watched[sessionName]; ok && existing.MR == mr {
-				existing.Project = project
-				existing.Repo = repo
-				// Refresh routing fields if we now have better data from KV.
-				if entryParcelle != "" {
-					existing.Parcelle = entryParcelle
-				}
-				if entryProcess != "" {
-					existing.ProcessName = entryProcess
-				}
-				existing.LastChecked = time.Now().UTC().Format(time.RFC3339)
-				return
-			}
-			isNewTracking = true
-			s.Watched[sessionName] = &state.WatchedMR{
-				Name:        sessionName,
-				Project:     project,
-				Repo:        repo,
-				Parcelle:    entryParcelle,
-				ProcessName: entryProcess,
-				MR:          mr,
-				LastNoteID:  0,
-				LastChecked: time.Now().UTC().Format(time.RFC3339),
-			}
+			isNewTracking = registerWatchedMR(s, sessionName, project, repo, mr, entryParcelle, entryProcess)
 		})
 
 		// Post a read-only terminal link on the MR (once) so a reviewer can watch

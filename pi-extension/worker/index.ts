@@ -27,6 +27,31 @@ const IS_STANDALONE = process.env.PINARD_STANDALONE === "1";
 const HOST = hostname();
 const AOC = "aoc";
 
+// Build provenance (TAG/COMMIT_SHORT), e.g. "v0.77.0/a1b2c3d" — see #302.
+// PINARD_BUILD is exported by bin/pinard when $PINARD_HOME/BUILD_INFO exists;
+// fall back to reading the file directly for callers that skip the launcher.
+function resolveBuild(): string | undefined {
+  if (process.env.PINARD_BUILD) return process.env.PINARD_BUILD;
+  const home = process.env.PINARD_HOME;
+  if (!home) return undefined;
+  try {
+    const { readFileSync } = require("node:fs");
+    const { join } = require("node:path");
+    const raw = readFileSync(join(home, "BUILD_INFO"), "utf8") as string;
+    const vals: Record<string, string> = {};
+    for (const line of raw.split("\n")) {
+      const idx = line.indexOf("=");
+      if (idx === -1) continue;
+      vals[line.slice(0, idx)] = line.slice(idx + 1).trim();
+    }
+    if (!vals.TAG || !vals.COMMIT_SHORT) return undefined;
+    return `${vals.TAG}/${vals.COMMIT_SHORT}`;
+  } catch {
+    return undefined;
+  }
+}
+const BUILD = resolveBuild();
+
 // For process-governed workers, use run ID as the stable NATS agent identifier.
 // Run ID survives respawns; session name does not.
 const AGENT_ID = (PROCESS_NAME && RUN_ID) ? RUN_ID : SESSION;
@@ -199,18 +224,24 @@ async function publishState(state: string, tempo: string, step?: string): Promis
     let preserved: Record<string, unknown> = {};
     try {
       const existing = await kvAgents.get(AGENT_ID);
-      if (existing) {
-        const parsed = JSON.parse(new TextDecoder().decode(existing.value)) as Record<string, unknown>;
+      if (existing && existing.value.length > 0) {
+        const raw = new TextDecoder().decode(existing.value);
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
         // Carry forward any fields not written by this worker.
         const workerFields = new Set([
           "project", "name", "agentId", "runId", "process", "parcelle",
-          "state", "tempo", "step", "cwd", "vignoble", "issueUrl", "host", "standalone", "lastSeen",
+          "state", "tempo", "step", "cwd", "vignoble", "issueUrl", "host", "standalone", "build", "lastSeen",
         ]);
         for (const [k, v] of Object.entries(parsed)) {
           if (!workerFields.has(k)) preserved[k] = v;
         }
       }
-    } catch { /* best-effort: if read fails, write fresh record */ }
+    } catch (readErr: any) {
+      const msg = readErr?.message ?? String(readErr);
+      if (!msg.includes("draining") && !msg.includes("closed")) {
+        console.error(`[worker] KV read failed (bucket=pinard-agents, key=${AGENT_ID}):`, msg);
+      }
+    }
     await kvAgents.put(AGENT_ID, JSON.stringify({
       ...preserved,
       project: PROJECT,
@@ -227,9 +258,15 @@ async function publishState(state: string, tempo: string, step?: string): Promis
       issueUrl: ISSUE_URL || undefined,
       host: HOST,
       standalone: IS_STANDALONE || undefined,
+      build: BUILD || undefined,
       lastSeen: new Date().toISOString(),
     }));
-  } catch {}
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    if (!msg.includes("draining") && !msg.includes("closed")) {
+      console.error(`[worker] KV publishState failed (bucket=pinard-agents, key=${AGENT_ID}):`, msg);
+    }
+  }
 }
 
 // ── Inbox (main channel) ─────────────────────────────────────
@@ -1174,7 +1211,7 @@ export default function worker(pi: ExtensionAPI) {
         _agentSessionId: SESSION,
         cwd: process.cwd(),
       });
-      if (kvAgents) {
+      if (kvAgents && !PROCESS_NAME) {
         try { await kvAgents.delete(AGENT_ID); } catch {}
       }
       // Keep the durable consumer for process workers (needed to resume after a
@@ -1186,13 +1223,14 @@ export default function worker(pi: ExtensionAPI) {
         } catch {}
       }
     }
-    try { if (nc) await nc.drain(); } catch {}
+    const _nc = nc;
+    kvAgents = null;
+    js = null;
+    nc = null;
     inboxSub = null;
     btwSub = null;
     interruptSub = null;
     jsInboxConsumer = null;
-    nc = null;
-    js = null;
-    kvAgents = null;
+    try { if (_nc) await _nc.drain(); } catch {}
   });
 }

@@ -23,7 +23,7 @@ describe("Contract: MR merged event flows from watcher to LLM", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("delivers formatted mr_merged message to LLM via sendUserMessage", async () => {

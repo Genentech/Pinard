@@ -26,7 +26,7 @@ describe("Contract: Scheduler events flow to conductor", () => {
   });
 
   afterAll(async () => {
-    await infra.cleanup();
+    if (infra) await infra.cleanup();
   });
 
   it("schedule_spawned delivers formatted message", async () => {
