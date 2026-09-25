@@ -2,6 +2,7 @@ package surreal
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1090,6 +1091,174 @@ func TestSchemaWikiDocTitleNotUnique(t *testing.T) {
 		}
 		if strings.HasPrefix(trimmed, "DEFINE INDEX") && strings.Contains(trimmed, "wiki_doc_title ") && strings.Contains(trimmed, "UNIQUE") {
 			t.Errorf("wiki_doc_title must not be UNIQUE: %s", trimmed)
+		}
+	}
+}
+
+// ── wiki_mentions: stable concept identity (#320) ─────────────────────────────
+
+func TestEntityIDPart(t *testing.T) {
+	if got := entityIDPart("entity:abc123"); got != "abc123" {
+		t.Errorf("entityIDPart(entity:abc123) = %q, want %q", got, "abc123")
+	}
+	if got := entityIDPart("abc123"); got != "abc123" {
+		t.Errorf("entityIDPart(abc123) = %q, want %q (no prefix to strip)", got, "abc123")
+	}
+}
+
+func TestPluralityPath_Empty(t *testing.T) {
+	if got := pluralityPath(map[string]int{}); got != "" {
+		t.Errorf("pluralityPath(empty) = %q, want \"\"", got)
+	}
+}
+
+func TestPluralityPath_ClearWinner(t *testing.T) {
+	counts := map[string]int{"decisions/a": 1, "decisions/b": 3, "decisions/c": 2}
+	if got := pluralityPath(counts); got != "decisions/b" {
+		t.Errorf("pluralityPath = %q, want %q", got, "decisions/b")
+	}
+}
+
+func TestPluralityPath_TieBreaksLexicographically(t *testing.T) {
+	counts := map[string]int{"decisions/z": 2, "decisions/a": 2}
+	if got := pluralityPath(counts); got != "decisions/a" {
+		t.Errorf("pluralityPath tie-break = %q, want %q", got, "decisions/a")
+	}
+}
+
+func TestFindWikiDocByEntities_NoEntityIDs(t *testing.T) {
+	// Short-circuits without contacting the server.
+	c, err := NewWithConfig("g", "http://unused.invalid", "root", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := c.FindWikiDocByEntities(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if path != "" {
+		t.Errorf("path = %q, want \"\"", path)
+	}
+}
+
+func TestFindWikiDocByEntities_NoMatches(t *testing.T) {
+	srv := mockSurrealServer(t, []rpcResult{
+		{Status: "OK", Result: json.RawMessage(`[]`)},
+	})
+	defer srv.Close()
+	c, err := NewWithConfig("g", srv.URL, "root", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := c.FindWikiDocByEntities([]string{"entity:abc"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if path != "" {
+		t.Errorf("path = %q, want \"\" (no edges yet)", path)
+	}
+}
+
+// TestFindWikiDocByEntities_PluralityWins (#320): when a cluster's entities
+// have accumulated edges to two different existing docs (clusters merge over
+// time), the doc covering the plurality of the cluster's entities wins.
+func TestFindWikiDocByEntities_PluralityWins(t *testing.T) {
+	result := json.RawMessage(`[{"path":"decisions/foo"},{"path":"decisions/foo"},{"path":"decisions/bar"}]`)
+	srv := mockSurrealServer(t, []rpcResult{
+		{Status: "OK", Result: result},
+	})
+	defer srv.Close()
+	c, err := NewWithConfig("g", srv.URL, "root", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := c.FindWikiDocByEntities([]string{"entity:a", "entity:b", "entity:c"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if path != "decisions/foo" {
+		t.Errorf("path = %q, want %q", path, "decisions/foo")
+	}
+}
+
+// TestWriteWikiMentions_DeletesThenRelatesPerEntity (#320): WriteWikiMentions
+// must clear the doc's existing outbound edges before writing the current set,
+// so entities dropped from a cluster (entity deletion) are unlinked rather
+// than accumulating stale edges forever.
+func TestWriteWikiMentions_DeletesThenRelatesPerEntity(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Params []json.RawMessage `json:"params"`
+		}
+		bodyBytes, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(bodyBytes))
+		_ = json.Unmarshal(bodyBytes, &req)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rpcResponse{Result: []rpcResult{{Status: "OK", Result: json.RawMessage(`[{}]`)}}})
+	}))
+	defer srv.Close()
+
+	c, err := NewWithConfig("g", srv.URL, "root", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WriteWikiMentions("decisions/foo", []string{"entity:a", "entity:b"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// One DELETE followed by one RELATE per entity.
+	if len(bodies) != 3 {
+		t.Fatalf("got %d requests, want 3 (1 DELETE + 2 RELATE)", len(bodies))
+	}
+	if !strings.Contains(bodies[0], "DELETE wiki_mentions") {
+		t.Errorf("first request should be the DELETE, got: %s", bodies[0])
+	}
+	for _, b := range bodies[1:] {
+		if !strings.Contains(b, "RELATE") || !strings.Contains(b, "wiki_mentions") {
+			t.Errorf("expected a RELATE ... wiki_mentions request, got: %s", b)
+		}
+	}
+}
+
+// TestSchemaDefinesEveryFieldUpsertWikiDocWrites guards the class of bug that
+// turned master red after !611: wiki_doc is SCHEMAFULL, so any field written by
+// UpsertWikiDoc that is not DEFINEd is rejected on a freshly created database
+// with "Found field 'X', but no such field exists for table 'wiki_doc'".
+//
+// It stayed latent because DEFINE TABLE ... IF NOT EXISTS never converts an
+// already-existing table, so long-lived DBs kept their permissive (pre-
+// SCHEMAFULL) wiki_doc and accepted the write. Only brand-new scope databases —
+// CI, and any newly onboarded vigne — hit it.
+func TestSchemaDefinesEveryFieldUpsertWikiDocWrites(t *testing.T) {
+	sqlBytes, err := schemaFS.ReadFile("schema.surql")
+	if err != nil {
+		t.Fatalf("read schema.surql: %v", err)
+	}
+	sql := string(sqlBytes)
+
+	defined := map[string]bool{}
+	for _, line := range strings.Split(sql, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "--") || !strings.Contains(trimmed, "ON wiki_doc") {
+			continue
+		}
+		f := strings.Fields(trimmed)
+		// DEFINE FIELD IF NOT EXISTS <name> ON wiki_doc ...
+		for i, tok := range f {
+			if tok == "ON" && i > 0 {
+				defined[f[i-1]] = true
+			}
+		}
+	}
+
+	// Every field UpsertWikiDoc assigns must be DEFINEd on the table.
+	for _, field := range []string{
+		"title", "type", "body", "summary", "path",
+		"status", "confidence", "frontmatter", "embedding", "updated_at",
+	} {
+		if !defined[field] {
+			t.Errorf("wiki_doc.%s is written by UpsertWikiDoc but not DEFINEd in schema.surql — "+
+				"a freshly created SCHEMAFULL database will reject the write", field)
 		}
 	}
 }

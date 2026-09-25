@@ -12,9 +12,11 @@ import (
 	"time"
 
 	"github.com/Genentech/pinard/internal/config"
+	"github.com/Genentech/pinard/internal/git"
 	"github.com/Genentech/pinard/internal/gitlab"
 	"github.com/Genentech/pinard/internal/pnats"
 	"github.com/Genentech/pinard/internal/pressoir"
+	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/state"
 )
 
@@ -33,9 +35,9 @@ func extractContractID(description string) string {
 }
 
 type IssueWatcher struct {
-	State    *state.Store[state.IssueWatcherState]
-	NATS     *pnats.Client
-	KV       pnats.KVWriter
+	State *state.Store[state.IssueWatcherState]
+	NATS  *pnats.Client
+	KV    pnats.KVWriter
 	// Pressoir is the vignoble-default provider-neutral adapter (fallback when
 	// Resolver is nil or per-repo resolution fails).
 	Pressoir pressoir.Pressoir
@@ -45,12 +47,19 @@ type IssueWatcher struct {
 	// GitLab is retained for ListIssueNotes (needs gitlab.Note.System/Author/ID
 	// fields not yet in the neutral pressoir.Comment model), and for the glab
 	// reply-command hint Host field.
-	GitLab   *gitlab.Client
-	Vignoble *config.Vignoble
-	Creds    *config.Credentials
-	User     string // GitLab username to watch assignments for (bot user)
-	Owner    string // Tenant owner GitLab username (trust anchor for spawn gate)
+	GitLab        *gitlab.Client
+	Vignoble      *config.Vignoble
+	Creds         *config.Credentials
+	User          string // GitLab username to watch assignments for (bot user)
+	Owner         string // Tenant owner GitLab username (trust anchor for spawn gate)
 	CapsulePoller *CapsulePoller
+	// Session, when set, is used by RespawnIssue to tear down a stale tmux
+	// session before respawning. Nil is safe (no-op) — mirrors MRWatcher.Session.
+	Session session.Manager
+	// MRState, when set, is used by RespawnIssue's open-MR guard (and to drop a
+	// stale WatchedMR entry on a forced reap). Nil is safe (guard can't confirm
+	// there's no MR, so it doesn't refuse — mirrors `aoc gc`'s hasOpenMR).
+	MRState *state.Store[state.MRWatcherState]
 }
 
 // pressoirFor returns the pressoir adapter for the given repo path.
@@ -500,6 +509,155 @@ func (w *IssueWatcher) autoSpawnForIssue(project, repo string, issue gitlab.Issu
 		"add_labels": "in-progress",
 	})
 	return true
+}
+
+// RespawnIssue is the atomic, immediate alternative to the two-step
+// `pinard:discarded` label ritual: clear stale labels, reap any live
+// worker/worktree left over from a previous spawn, reset the watcher state to
+// "seen", and spawn right away instead of waiting for the next poll cycle.
+// Safe to call regardless of the issue's current tracked status. The owner
+// approval gate still applies — an unapproved issue is held, not force-spawned.
+//
+// If the previous worker has an open, unmerged MR, RespawnIssue refuses
+// (mirrors `aoc gc`'s open-MR guard) unless force is true: reaping it
+// unconditionally would delete only the *local* branch, leaving the remote
+// branch and MR open with no worker attached — and the fresh worker would
+// then open a second MR for the same issue. Pass force=true to explicitly
+// abandon the open MR (its stale WatchedMR entry is dropped so the MR watcher
+// stops polling it).
+func (w *IssueWatcher) RespawnIssue(vigneName string, iid int, force bool) (string, error) {
+	vigne, ok := w.Vignoble.Config.Vignes[vigneName]
+	if !ok {
+		return "", fmt.Errorf("vigne %q not found in vignes.yaml", vigneName)
+	}
+	repo := vigne.Repo
+	if repo == "" {
+		return "", fmt.Errorf("vigne %q has no repo configured", vigneName)
+	}
+
+	issue, err := w.getIssue(repo, iid)
+	if err != nil {
+		return "", fmt.Errorf("fetch %s #%d: %w", vigneName, iid, err)
+	}
+
+	if hasLabel(issue.Labels, "blocked") {
+		return "", fmt.Errorf("%s #%d carries the 'blocked' label — remove it before respawning", vigneName, iid)
+	}
+
+	var actions []string
+
+	var staleLabels []string
+	for _, l := range issue.Labels {
+		if l == "pinard:discarded" || l == "in-progress" {
+			staleLabels = append(staleLabels, l)
+		}
+	}
+	if len(staleLabels) > 0 {
+		w.updateIssue(repo, iid, map[string]string{"remove_labels": strings.Join(staleLabels, ",")})
+		actions = append(actions, "cleared labels: "+strings.Join(staleLabels, ", "))
+	}
+
+	reaped, err := w.reapWorkerForIssue(vigneName, iid, force)
+	if err != nil {
+		// Refused (open MR, no force): don't touch watcher state or spawn a
+		// second worker for the same issue — the labels-cleared action above
+		// already happened, so surface it alongside the refusal reason.
+		return strings.Join(actions, "; "), err
+	}
+	if reaped != "" {
+		actions = append(actions, reaped)
+	} else {
+		actions = append(actions, "no live worker/worktree found to reap")
+	}
+
+	var contractID string
+	w.State.Read(func(s *state.IssueWatcherState) {
+		if s.Seen == nil {
+			return
+		}
+		if proj, ok := s.Seen[vigneName]; ok {
+			if entry := proj[fmt.Sprintf("%d", iid)]; entry != nil {
+				contractID = entry.ContractID
+			}
+		}
+	})
+
+	w.recordIssue(vigneName, *issue, "seen", contractID)
+	actions = append(actions, "reset watcher state to seen")
+
+	summary := strings.Join(actions, "; ")
+	if spawned := w.spawnIfApproved(vigneName, repo, *issue, nil, contractID); !spawned {
+		return summary, fmt.Errorf("%s; spawn did not complete — owner approval pending or spawn failed (see issue notes)", summary)
+	}
+	return summary + fmt.Sprintf("; spawned worker for %s #%d", vigneName, iid), nil
+}
+
+// reapWorkerForIssue tears down any live worker (tmux session + KV entry +
+// git worktree) already tracked for this project/issue, so a respawn starts
+// clean instead of colliding with a stale session or worktree.
+//
+// Guard: refuses (returns an error, does nothing) when the worker has an
+// open, unmerged MR and force is false — see RespawnIssue's doc comment for
+// why. force=true bypasses the guard and, once the worker is reaped, drops
+// its now-stale WatchedMR entry so the MR watcher isn't left tracking a
+// session that no longer exists.
+//
+// Returns a description of what was reaped ("" if nothing was found), or an
+// error if refused.
+func (w *IssueWatcher) reapWorkerForIssue(project string, iid int, force bool) (string, error) {
+	if w.KV == nil {
+		return "", nil
+	}
+	key := w.findAgentForIssue(project, iid)
+	if key == "" {
+		return "", nil
+	}
+	data, err := w.KV.Get("pinard-agents", key)
+	if err != nil || data == nil {
+		return "", nil
+	}
+	name, _ := data["name"].(string)
+	if name == "" {
+		name = key
+	}
+
+	if mr, open := state.OpenMR(w.MRState, key, name); open && !force {
+		return "", fmt.Errorf("worker %s (tmux session %q) has an open MR !%d — refusing to respawn over it (would orphan the MR: its remote branch survives but no worker is attached, and the new spawn would open a second MR for this issue); pass force to respawn anyway", key, name, mr)
+	}
+
+	if w.Session != nil {
+		w.Session.StopWorker(w.Vignoble.Name, name)
+	}
+	if err := w.KV.Del("pinard-agents", key); err != nil {
+		log.Printf("[issue-watcher] respawn: failed to delete KV entry %q: %v", key, err)
+	}
+	w.reapIssueWorktree(project, name)
+
+	msg := fmt.Sprintf("reaped stale worker %s (tmux session %q)", key, name)
+	if state.DropWatchedMR(w.MRState, key, name) {
+		msg += "; dropped its stale MR-watcher entry"
+	}
+	return msg, nil
+}
+
+// reapIssueWorktree removes the git worktree for the given worker session
+// name from the project's .worktrees directory, then prunes.
+func (w *IssueWatcher) reapIssueWorktree(project, sessionName string) {
+	vigne, ok := w.Vignoble.Config.Vignes[project]
+	if !ok {
+		return
+	}
+	projectPath := vigne.ExpandedPath()
+	wtPath := filepath.Join(projectPath, ".worktrees", sessionName)
+	if _, err := os.Stat(wtPath); err != nil {
+		return
+	}
+	branch, err := git.CurrentBranch(wtPath)
+	if err == nil && branch != "" {
+		git.WorktreeRemove(projectPath, wtPath)
+		git.DeleteBranch(projectPath, branch)
+	}
+	git.WorktreePrune(projectPath)
 }
 
 func (w *IssueWatcher) findParcelleForIssue(issueIID int) string {

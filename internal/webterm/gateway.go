@@ -428,6 +428,10 @@ type sessionEntry struct {
 	Remote      bool   `json:"remote,omitempty"`
 	Unreachable bool   `json:"unreachable,omitempty"`
 	Build       string `json:"build,omitempty"`
+	Errored     bool   `json:"errored,omitempty"`
+	LastError   string `json:"lastError,omitempty"`
+	Stalled     bool   `json:"stalled,omitempty"`
+	Compactions int    `json:"compactions,omitempty"`
 }
 
 type sessionIndex struct {
@@ -552,6 +556,11 @@ func (g *Gateway) buildIndex(v string, reply ListReply) sessionIndex {
 				if b, ok := rec["build"].(string); ok {
 					e.Build = b
 				}
+				health := pnats.DeriveAgentHealth(rec, time.Now(), agentLivenessThreshold)
+				e.Errored = health.Errored
+				e.LastError = health.LastError
+				e.Stalled = health.Stalled
+				e.Compactions = health.Compactions
 			}
 		}
 		idx.Vendangeurs = append(idx.Vendangeurs, e)
@@ -604,6 +613,11 @@ func (g *Gateway) buildIndex(v string, reply ListReply) sessionIndex {
 				if b, ok := rec["build"].(string); ok {
 					e.Build = b
 				}
+				health := pnats.DeriveAgentHealth(rec, time.Now(), agentLivenessThreshold)
+				e.Errored = health.Errored
+				e.LastError = health.LastError
+				e.Stalled = health.Stalled
+				e.Compactions = health.Compactions
 				idx.Vendangeurs = append(idx.Vendangeurs, e)
 			}
 		}

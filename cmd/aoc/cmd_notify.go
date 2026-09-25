@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Genentech/pinard/internal/config"
+	"github.com/Genentech/pinard/internal/logrotate"
 	"github.com/Genentech/pinard/internal/pnats"
 	"github.com/spf13/cobra"
 )
@@ -66,11 +67,13 @@ var notifyCmd = &cobra.Command{
 			logFile = filepath.Join(stateDir, "notifications.log")
 		}
 		os.MkdirAll(filepath.Dir(logFile), 0755)
-		f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			fmt.Fprintf(f, "%s %s\n", time.Now().Format(time.RFC3339), message)
-			f.Close()
+		notifyLogCfg := logrotate.Config{MaxSizeMB: 20, MaxBackups: 3, MaxAgeDays: 30, Compress: true}
+		lw := logrotate.NewWriter(logFile, notifyLogCfg)
+		if _, err := logrotate.ReclaimIfOversized(lw, notifyLogCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "[notify] reclaim %s failed (non-fatal): %v\n", logFile, err)
 		}
+		fmt.Fprintf(lw, "%s %s\n", time.Now().Format(time.RFC3339), message)
+		lw.Close()
 
 		fmt.Printf("Notified: %s\n", message)
 		return nil

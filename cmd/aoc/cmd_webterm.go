@@ -136,8 +136,19 @@ var webtermLinkCmd = &cobra.Command{
 // the host Responder (TmuxBackend), without requiring tmux. This is the
 // daemon-less / HPC / Singularity --containall path.
 //
-// The command reads from the PTY master fd number passed via --pty-fd (the
-// caller — bin/pinard --worker — opens a PTY pair and passes the master fd).
+// Two modes:
+//
+//   - --exec -- <command…>: the responder itself owns the PTY. It starts
+//     <command…> (pi) as a child on a new PTY slave via webterm.RunSupervised,
+//     mirrors it to the responder's own controlling terminal, and serves the
+//     PTY master to viewers over NATS. This is the supported daemon-less / HPC
+//     path — the responder must launch the child so it genuinely holds the
+//     master, never a stray fd from a backgrounded shell (#307). When the
+//     responder is not configured (webterm.grant_secret unset), --exec skips
+//     the PTY entirely and exec's the child directly.
+//   - --pty-fd <fd>: serve an already-open PTY *master* fd, for callers that
+//     genuinely hold one themselves. fd 0 (a slave) is NOT valid here.
+//
 // It subscribes to ReqSubject, verifies grants, and serves each viewer via
 // per-viewer OutSubject/InSubject/CtlSubject/EvtSubject.
 var webtermWorkerResponderCmd = &cobra.Command{
@@ -145,16 +156,26 @@ var webtermWorkerResponderCmd = &cobra.Command{
 	Short: "Run the grant-gated worker PTY responder (daemon-less / HPC path)",
 	Long: "Serves the worker's own PTY over NATS using the same grant-gated protocol as\n" +
 		"webterm-responder, but without tmux. Called by bin/pinard --worker before\n" +
-		"exec'ing pi on daemon-less / HPC / Singularity hosts.\n\n" +
-		"Requires --session-name and --pty-fd; webterm.grant_secret in credentials.",
+		"launching pi on daemon-less / HPC / Singularity hosts.\n\n" +
+		"Requires --session-name and exactly one of:\n" +
+		"  --exec -- <command…>   supervise <command…> on a new PTY (recommended)\n" +
+		"  --pty-fd <fd>          serve an already-open PTY MASTER fd\n\n" +
+		"webterm.grant_secret in credentials.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		execMode, _ := cmd.Flags().GetBool("exec")
 		ptyFD, _ := cmd.Flags().GetInt("pty-fd")
 		sessionName, _ := cmd.Flags().GetString("session-name")
-		if ptyFD < 0 {
-			return fmt.Errorf("--pty-fd is required")
-		}
 		if sessionName == "" {
 			return fmt.Errorf("--session-name is required")
+		}
+		if execMode && ptyFD >= 0 {
+			return fmt.Errorf("--exec and --pty-fd are mutually exclusive")
+		}
+		if !execMode && ptyFD < 0 {
+			return fmt.Errorf("one of --exec (with a command after --) or --pty-fd is required")
+		}
+		if execMode && len(args) == 0 {
+			return fmt.Errorf("--exec requires a command after --")
 		}
 
 		creds, err := config.LoadCredentials()
@@ -162,6 +183,12 @@ var webtermWorkerResponderCmd = &cobra.Command{
 			return err
 		}
 		if !creds.WebtermResponderEnabled() {
+			if execMode {
+				// No PTY indirection needed — exec the child directly, inheriting
+				// stdio/env, so the worker runs exactly as it would without this
+				// feature. The responder is opt-in via grant_secret.
+				return execReplace(args)
+			}
 			// Not configured — silently exit. The worker still runs without a
 			// responder; the feature is opt-in via grant_secret.
 			return nil
@@ -171,18 +198,38 @@ var webtermWorkerResponderCmd = &cobra.Command{
 			return fmt.Errorf("could not resolve vignoble name (use --vignoble-name or set NATS_VIGNOBLE)")
 		}
 
-		ptyFile := os.NewFile(uintptr(ptyFD), "pty-master")
-		if ptyFile == nil {
-			return fmt.Errorf("could not open pty fd %d", ptyFD)
-		}
-
 		nc := pnats.NewClient(creds)
 		if err := nc.Connect(); err != nil {
 			return err
 		}
 		defer nc.Close()
 
-		backend := &webterm.ProcessBackend{
+		resp := &webterm.Responder{
+			NC:          nc.Conn(),
+			Vignoble:    vignoble,
+			GrantSecret: creds.WebtermGrantSecret(),
+			MaxViewers:  creds.WebtermMaxViewers(),
+			IdleTimeout: creds.WebtermIdleTimeout(),
+		}
+
+		if execMode {
+			// RunSupervised owns signal handling for the child (SIGINT/SIGTERM
+			// forwarding, SIGWINCH resize) and cancels the responder itself once
+			// the child exits — do not race it with an outer NotifyContext.
+			log.Printf("[webterm] worker responder starting in supervisor mode (vignoble=%s session=%s)", vignoble, sessionName)
+			code, err := webterm.RunSupervised(context.Background(), args, resp, sessionName)
+			if err != nil {
+				return err
+			}
+			os.Exit(code)
+			return nil
+		}
+
+		ptyFile := os.NewFile(uintptr(ptyFD), "pty-master")
+		if ptyFile == nil {
+			return fmt.Errorf("could not open pty fd %d", ptyFD)
+		}
+		resp.Backend = &webterm.ProcessBackend{
 			Target: sessionName,
 			PTY:    ptyFile,
 			Setsize: func(cols, rows int) {
@@ -193,20 +240,22 @@ var webtermWorkerResponderCmd = &cobra.Command{
 			},
 		}
 
-		resp := &webterm.Responder{
-			NC:          nc.Conn(),
-			Vignoble:    vignoble,
-			GrantSecret: creds.WebtermGrantSecret(),
-			MaxViewers:  creds.WebtermMaxViewers(),
-			IdleTimeout: creds.WebtermIdleTimeout(),
-			Backend:     backend,
-		}
-
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 		log.Printf("[webterm] worker responder starting (vignoble=%s session=%s)", vignoble, sessionName)
 		return resp.Run(ctx)
 	},
+}
+
+// execReplace replaces the current process image with argv, inheriting
+// stdio/env. Used when --exec is requested but the responder is not
+// configured, so the child runs with zero PTY indirection.
+func execReplace(argv []string) error {
+	bin, err := exec.LookPath(argv[0])
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(bin, argv, os.Environ())
 }
 
 // agentLivenessThreshold mirrors the value in internal/webterm/gateway.go.
@@ -360,8 +409,15 @@ var webtermDoctorCmd = &cobra.Command{
 			if !isStandalone {
 				role = "unreachable-local"
 			}
-			fmt.Printf("%-9s  %-40s  name=%s role=%s state=%s/%s host=%s build=%s age=%s\n",
-				"INCLUDE", k, name, role, state, tempo, host, build, age)
+			health := pnats.DeriveAgentHealth(rec, now, agentLivenessThreshold)
+			healthSuffix := fmt.Sprintf(" compactions=%d", health.Compactions)
+			if health.Errored {
+				healthSuffix += fmt.Sprintf(" errored=%q", health.LastError)
+			} else if health.Stalled {
+				healthSuffix += " stalled"
+			}
+			fmt.Printf("%-9s  %-40s  name=%s role=%s state=%s/%s host=%s build=%s age=%s%s\n",
+				"INCLUDE", k, name, role, state, tempo, host, build, age, healthSuffix)
 		}
 		if skippedTombstones > 0 {
 			fmt.Printf("(skipped %d deleted/tombstoned keys)\n", skippedTombstones)
@@ -375,7 +431,8 @@ func init() {
 	rootCmd.AddCommand(webtermResponderCmd)
 
 	webtermWorkerResponderCmd.Flags().String("vignoble-name", "", "Vignoble name (NATS namespace); defaults to NATS_VIGNOBLE or the resolved vignoble")
-	webtermWorkerResponderCmd.Flags().Int("pty-fd", -1, "PTY master file descriptor (opened by the caller)")
+	webtermWorkerResponderCmd.Flags().Bool("exec", false, "Supervise the command after -- on a new PTY (recommended daemon-less/HPC path); mutually exclusive with --pty-fd")
+	webtermWorkerResponderCmd.Flags().Int("pty-fd", -1, "PTY MASTER file descriptor already opened by the caller (must not be a slave/fd 0); mutually exclusive with --exec")
 	webtermWorkerResponderCmd.Flags().String("session-name", "", "Session name this responder answers for")
 	rootCmd.AddCommand(webtermWorkerResponderCmd)
 

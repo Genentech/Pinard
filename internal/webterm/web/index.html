@@ -56,7 +56,7 @@
       return r.json();
     }
     function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-    function stateIcon(s){ return s === "active" ? "⚡" : s === "failed" ? "❌" : s ? "💤" : ""; }
+    function stateIcon(s){ return s === "active" ? "⚡" : s === "errored" || s === "failed" ? "❌" : s ? "💤" : ""; }
     function termLink(v, target){ return `/sessions?v=${encodeURIComponent(v)}&target=${encodeURIComponent(target)}`; }
 
     // Role/vineyard emojis: 🎩 régisseur · 🧑‍🌾 maître · 🌿 parcelle · 🧺 vendangeur
@@ -66,16 +66,17 @@
       const remoteBadge = e.remote ? `<span class="st" title="remote — attach via self-served responder">🌐</span>` : "";
       const unreachableBadge = e.unreachable ? `<span class="st" title="local — responder unavailable">⚠️</span>` : "";
       const buildBadge = e.build ? `<span class="st" title="build ${esc(e.build)}">🏷️</span>` : "";
+      const errorBadge = e.errored ? `<span class="st err" title="errored: ${esc(e.lastError || "")}">⚠️ errored</span>` : e.stalled ? `<span class="st err" title="no state transition in a while">⚠️ stalled</span>` : "";
       if (e.remote) {
         return `<a class="row" href="${termLink(v, e.target)}" target="_blank" rel="noopener">
-          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${remoteBadge}${buildBadge}</a>`;
+          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${remoteBadge}${buildBadge}${errorBadge}</a>`;
       }
       if (e.unreachable) {
         return `<div class="row" style="opacity:.6">
-          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${unreachableBadge}${buildBadge}</div>`;
+          <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${unreachableBadge}${buildBadge}${errorBadge}</div>`;
       }
       return `<a class="row" href="${termLink(v, e.target)}" target="_blank" rel="noopener">
-        <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${buildBadge}</a>`;
+        <span class="ic">${icon}</span><span class="nm">${esc(e.name)}</span>${st}${buildBadge}${errorBadge}</a>`;
     }
 
     async function showVignoble(v){

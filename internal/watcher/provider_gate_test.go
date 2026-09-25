@@ -46,6 +46,9 @@ type autoMergePressoir struct {
 	approved         bool
 	approvalErr      error
 	approvalCallCount int
+	addedLabels      []string
+	removedLabels    []string
+	removeLabelErr   error
 }
 
 func (s *autoMergePressoir) CIStatusFor(_ context.Context, _ pressoir.RepoRef, _ int) (pressoir.CIStatus, error) {
@@ -116,6 +119,14 @@ func (s *autoMergePressoir) PostIssueNote(_ context.Context, _ pressoir.RepoRef,
 }
 func (s *autoMergePressoir) SetLabels(_ context.Context, _ pressoir.RepoRef, _ int, _ []string) error {
 	return nil
+}
+func (s *autoMergePressoir) AddLabel(_ context.Context, _ pressoir.RepoRef, _ int, label string) error {
+	s.addedLabels = append(s.addedLabels, label)
+	return nil
+}
+func (s *autoMergePressoir) RemoveLabel(_ context.Context, _ pressoir.RepoRef, _ int, label string) error {
+	s.removedLabels = append(s.removedLabels, label)
+	return s.removeLabelErr
 }
 func (s *autoMergePressoir) ListIssueNotes(_ context.Context, _ pressoir.RepoRef, _ int) ([]pressoir.Comment, error) {
 	return nil, nil

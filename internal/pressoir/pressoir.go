@@ -139,6 +139,11 @@ type Pressoir interface {
 	UpdateIssue(ctx context.Context, repo RepoRef, number int, params map[string]string) error
 	PostIssueNote(ctx context.Context, repo RepoRef, number int, body string) error
 	SetLabels(ctx context.Context, repo RepoRef, number int, labels []string) error
+	// AddLabel and RemoveLabel are additive/subtractive label operations —
+	// unlike SetLabels (replace-all), they never disturb other labels already
+	// on the issue/PR (e.g. auto-merge, parcelle:*).
+	AddLabel(ctx context.Context, repo RepoRef, number int, label string) error
+	RemoveLabel(ctx context.Context, repo RepoRef, number int, label string) error
 	ListIssueNotes(ctx context.Context, repo RepoRef, number int) ([]Comment, error)
 	LinkIssues(ctx context.Context, repo RepoRef, number int, targetRepo RepoRef, targetNumber int, linkType string) error
 	// AddSubIssue attaches childNumber as a sub-issue of parentNumber.

@@ -612,16 +612,23 @@ YAML
   #
   # 1. Non-daemon host WITH tmux (normal local worker): use aoc webterm-responder
   #    (TmuxBackend). The daemon already handles this on the pinard host.
-  # 2. Daemon-less / HPC / Singularity (no tmux, no daemon): use
-  #    aoc webterm-worker-responder (ProcessBackend) which bridges the current
-  #    process's controlling PTY (fd 0) directly over NATS — same grant-gated
-  #    protocol, no tmux required. Mirrors the engram self-serve pattern.
+  # 2. Daemon-less / HPC / Singularity (no tmux, no daemon): the responder must
+  #    OWN a PTY master with pi running on the slave — it cannot be handed a
+  #    stray fd from a backgrounded shell (that reads the wrong side of the PTY
+  #    and dies instantly to SIGTTIN/EIO, see #307). So instead of backgrounding
+  #    a responder here, we arrange for `aoc webterm-worker-responder --exec` to
+  #    itself launch pi (below, at the actual pi invocation) as a supervised
+  #    child on a fresh PTY, bridging that PTY to both this terminal and NATS
+  #    viewers. _WT_SUPERVISE, when non-empty, is prefixed onto the pi command.
   #
   # In both cases we skip if a daemon is already serving this vignoble (it runs
   # an in-process responder) and if a responder for this vignoble is already up
   # (avoid reply-race duplicates).
+  _WT_SUPERVISE=()
   if command -v aoc &>/dev/null; then
-    _wt_log="${BABYSITTER_RUNS_DIR:-/tmp}/webterm-responder.log"
+    _wt_log_dir="${BABYSITTER_RUNS_DIR:-/tmp}/${BABYSITTER_RUN_ID:-misc}"
+    mkdir -p "$_wt_log_dir" 2>/dev/null || _wt_log_dir="${BABYSITTER_RUNS_DIR:-/tmp}"
+    _wt_log="$_wt_log_dir/webterm-responder.log"
     if pgrep -f "aoc daemon" >/dev/null 2>&1; then
       : # daemon host — its in-process responder handles tmux sessions
     elif pgrep -f "webterm-responder --vignoble-name $VIGNOBLE_NAME" >/dev/null 2>&1; then
@@ -631,15 +638,14 @@ YAML
       # tmux session. This is the normal (non-Singularity) remote-worker path.
       ( aoc webterm-responder --vignoble-name "$VIGNOBLE_NAME" >>"$_wt_log" 2>&1 & ) || true
     elif [ -t 0 ]; then
-      # No tmux, stdin is a PTY (daemon-less / Singularity --containall):
-      # self-serve the worker responder bridging this process's PTY (fd 0).
-      # The grant-gated ProcessBackend serves the same protocol as TmuxBackend.
+      # No tmux, stdin is a PTY (daemon-less / Singularity --containall): have
+      # the responder itself launch pi as a supervised child on a fresh PTY
+      # (below), instead of backgrounding against a stray fd.
       _wt_session="${WORKER_SESSION:-${BABYSITTER_RUN_ID:-$VIGNOBLE_NAME-worker}}"
-      ( aoc webterm-worker-responder \
+      _WT_SUPERVISE=(aoc webterm-worker-responder \
           --vignoble-name "$VIGNOBLE_NAME" \
           --session-name "$_wt_session" \
-          --pty-fd 0 \
-          >>"$_wt_log" 2>&1 & ) || true
+          --exec --)
     fi
   fi
 
@@ -677,7 +683,12 @@ YAML
   fi
 
   _wait_for_engram
-  _run_with_engram_flush pi --provider "${PINARD_PROVIDER:-proxy}" \
+  # _WT_SUPERVISE (set above) is non-empty only on the daemon-less/HPC path with
+  # no tmux: it prefixes `aoc webterm-worker-responder --exec --` so the
+  # responder itself launches pi as a supervised child on a fresh PTY, instead
+  # of pi running directly. Everywhere else it's empty and this is a no-op —
+  # pi launches exactly as before.
+  _run_with_engram_flush "${_WT_SUPERVISE[@]}" pi --provider "${PINARD_PROVIDER:-proxy}" \
     --models "${PINARD_PROVIDER:-proxy}/$WORKER_MODEL" \
     "${_sess_args[@]}" \
     --extension "$PINARD_REPO/pi-extension/worker" \
@@ -736,7 +747,7 @@ _build_context_args() {
 # #120). get_maitre_status (régisseur) + report_to_regisseur (maître) are gated
 # by IS_MAITRE in the extension, so listing both is safe: each role only ever
 # registers the one it owns.
-_PINARD_TOOLS="read,write,edit,grep,find,ls,glob,bash,send_message,spawn_agent,create_cuvee,open_cuvee_mr,comment_mr,list_workers,list_parcelles,attach_parcelle,track_mr,kill_worker,interrupt_worker,read_issue,update_issue,get_notifications,get_watcher_logs,get_schedules,create_schedule,create_issue,link_issues,create_contract,get_agent_events,ack_event,update_config,get_maitre_status,report_to_regisseur,${_ENGRAM_TOOLS}"
+_PINARD_TOOLS="read,write,edit,grep,find,ls,glob,bash,send_message,spawn_agent,respawn_issue,create_cuvee,open_cuvee_mr,comment_mr,mark_mr_reviewed,list_workers,list_parcelles,attach_parcelle,track_mr,kill_worker,interrupt_worker,read_issue,update_issue,get_notifications,get_watcher_logs,get_schedules,create_schedule,create_issue,link_issues,create_contract,get_agent_events,ack_event,update_config,get_maitre_status,report_to_regisseur,${_ENGRAM_TOOLS}"
 
 # Resolve conductor-grade model (maîtres are conductor-grade too — not
 # downgraded) and the available --models list, both via aoc.

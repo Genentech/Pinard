@@ -1,6 +1,6 @@
 [project]
 name = "pinard"
-version = "0.70.1"
+version = "0.73.0"
 description = "Pinard — AI agent orchestration (chart version; cz-bump owns v* tags)"
 readme = "README.md"
 

@@ -593,13 +593,19 @@ func (r *Responder) pump(ctx context.Context, ptmx io.Reader, outSubject string)
 			pending = append([]byte(throttleMark), pending...)
 			dropped = false
 		}
-		take := pending
-		if len(take) > maxPerTick {
-			take = pending[:maxPerTick]
-			pending = pending[maxPerTick:]
-		} else {
-			pending = pending[:0]
+		n := len(pending)
+		if n > maxPerTick {
+			n = maxPerTick
 		}
+		// Copy into a fresh backing array rather than aliasing pending's: take is
+		// published below after the lock is released, while the reader goroutine
+		// keeps appending to (and, once drained, resetting/reusing the backing
+		// array of) pending concurrently — sharing the array here was a data race
+		// (the in-flight Publish could read bytes the reader had already
+		// overwritten).
+		take := make([]byte, n)
+		copy(take, pending[:n])
+		pending = append(pending[:0], pending[n:]...)
 		mu.Unlock()
 		for len(take) > 0 {
 			chunk := take

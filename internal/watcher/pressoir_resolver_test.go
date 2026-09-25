@@ -75,6 +75,12 @@ func (s *stubPressoir) PostIssueNote(_ context.Context, _ pressoir.RepoRef, _ in
 func (s *stubPressoir) SetLabels(_ context.Context, _ pressoir.RepoRef, _ int, _ []string) error {
 	return nil
 }
+func (s *stubPressoir) AddLabel(_ context.Context, _ pressoir.RepoRef, _ int, _ string) error {
+	return nil
+}
+func (s *stubPressoir) RemoveLabel(_ context.Context, _ pressoir.RepoRef, _ int, _ string) error {
+	return nil
+}
 func (s *stubPressoir) ListIssueNotes(_ context.Context, _ pressoir.RepoRef, _ int) ([]pressoir.Comment, error) {
 	return nil, nil
 }

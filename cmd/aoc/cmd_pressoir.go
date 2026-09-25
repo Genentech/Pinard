@@ -5,12 +5,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/Genentech/pinard/internal/config"
 	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/spf13/cobra"
 )
+
+// mrTitlePattern is the repo-wide MR/commit title convention: only fix:/feat:
+// prefixes are allowed, with an optional (scope), and a non-empty subject.
+var mrTitlePattern = regexp.MustCompile(`^(fix|feat)(\([^)]+\))?: .+`)
+
+// validateMRTitle enforces the fix:/feat: MR title convention at the single
+// seam every MR-opening path goes through (aoc pressoir open-pr), so a
+// non-conforming title is rejected before any network call is made.
+func validateMRTitle(title string) error {
+	if !mrTitlePattern.MatchString(title) {
+		return fmt.Errorf("MR title %q does not follow the required convention: must start with \"fix:\", \"feat:\", \"fix(scope):\", or \"feat(scope):\" (scope optional, prefix is not) — e.g. \"fix(ci): …\" or \"feat: …\"; other prefixes like \"docs:\", \"chore:\", \"ops:\", or \"observability:\" are not permitted", title)
+	}
+	return nil
+}
 
 // pressoirCmd is the top-level `aoc pressoir` group.
 // Subcommands expose the Pressoir interface over stdout (JSON) so the extension
@@ -274,6 +289,12 @@ var pressoirUpdateIssueCmd = &cobra.Command{
 		if v, _ := cmd.Flags().GetString("state-event"); v != "" {
 			params["state_event"] = v
 		}
+		// --unassign clears all assignees. GitLab's issues API treats an empty
+		// assignee_ids value as "unassign all" (documented behavior). Applied
+		// before --assignee so an explicit --assignee always wins if both are given.
+		if unassign, _ := cmd.Flags().GetBool("unassign"); unassign {
+			params["assignee_ids"] = ""
+		}
 		if v, _ := cmd.Flags().GetString("assignee"); v != "" {
 			user, err := pr.ResolveUser(context.Background(), v)
 			if err != nil {
@@ -306,6 +327,9 @@ var pressoirOpenPRCmd = &cobra.Command{
 		title, _ := cmd.Flags().GetString("title")
 		if repo == "" || src == "" || dst == "" || title == "" {
 			return fmt.Errorf("--repo, --src, --dst, and --title are required")
+		}
+		if err := validateMRTitle(title); err != nil {
+			return err
 		}
 		body, _ := cmd.Flags().GetString("body")
 		draft, _ := cmd.Flags().GetBool("draft")
@@ -525,6 +549,7 @@ func init() {
 	pressoirUpdateIssueCmd.Flags().String("remove-labels", "", "Comma-separated labels to remove")
 	pressoirUpdateIssueCmd.Flags().String("state-event", "", "State transition: 'close' or 'reopen'")
 	pressoirUpdateIssueCmd.Flags().String("assignee", "", "Username to assign")
+	pressoirUpdateIssueCmd.Flags().Bool("unassign", false, "Clear all assignees")
 	pressoirCmd.AddCommand(pressoirUpdateIssueCmd)
 
 	// open-pr

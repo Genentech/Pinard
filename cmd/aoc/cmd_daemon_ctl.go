@@ -199,17 +199,25 @@ var daemonStartCmd = &cobra.Command{
 		os.MkdirAll(vb.StateDir, 0755)
 		os.MkdirAll(vb.LogDir, 0755)
 		logPath := filepath.Join(vb.LogDir, "aoc-daemon.log")
-		logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		// The daemon child manages its own rotating log file internally (see
+		// daemon.go — log.SetOutput onto a logrotate writer for this same path).
+		// Redirect fd-level stdout/stderr to /dev/null here rather than the raw
+		// log file: keeping a second, never-rotated fd open on that path would
+		// defeat the point, and every daemon log line already goes through the
+		// stdlib log package. Only output emitted before the child installs its
+		// own log.SetOutput (i.e. before daemonCmd.RunE runs) is lost — a rare,
+		// tiny edge case (misconfiguration crashes before the vignoble resolves).
+		devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 		if err != nil {
-			return fmt.Errorf("open log: %w", err)
+			return fmt.Errorf("open %s: %w", os.DevNull, err)
 		}
-		defer logFile.Close()
+		defer devNull.Close()
 
 		child := exec.Command(selfPath(), "daemon")
 		child.Dir = vb.Path
 		child.Env = daemonChildEnv(vb)
-		child.Stdout = logFile
-		child.Stderr = logFile
+		child.Stdout = devNull
+		child.Stderr = devNull
 		child.Stdin = nil
 		// Detach into its own session so it survives the launching shell.
 		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

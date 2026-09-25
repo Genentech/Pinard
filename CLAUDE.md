@@ -187,6 +187,20 @@ browser ⇄ WebSocket ⇄ gateway (k8s) ⇄ core NATS ⇄ responder (tmux host) 
   session** (`tmux new-session -t <base>` + `select-window`), so opening a
   régisseur/maître window doesn't move the operator's active window; torn down with
   the viewer. Plain vendangeur sessions attach directly.
+- **Supervised (HPC) backend attach repaint + PTY size policy**
+  (`internal/webterm/supervisor.go`): `RunSupervised`'s `supervisedBackend` has
+  no tmux to repaint an attaching viewer's pane, so `ptyFanout` keeps a bounded
+  (`replayCapBytes`, 128 KB) rolling buffer of recent PTY output and replays it
+  to every new `subscribe()` call *before* any live chunk, so a late-joining or
+  re-attaching viewer sees the current screen immediately instead of blank until
+  the child next writes. Separately, the supervised PTY has two independent size
+  sources — the local controlling terminal's SIGWINCH-driven `syncSize()` and a
+  browser viewer's `CtlResize`/attach size — so the arbitration policy is an
+  explicit decision, **viewer-attached wins**: while any viewer is attached
+  (`supervisedBackend`'s atomic `viewers` counter > 0), `syncSize()` is a no-op;
+  when the last viewer detaches, `syncSize()` runs once more to resync to the
+  local terminal. Among multiple concurrent viewers, whichever resizes most
+  recently wins, as before. `TmuxBackend` is unaffected by either change.
 - **Known limitations:** one shared NATS connection (a dedicated account for terminal
   traffic is a follow-up). Grouped sessions pin `window-size manual` so viewer
   dimensions do not affect the operator's terminal.

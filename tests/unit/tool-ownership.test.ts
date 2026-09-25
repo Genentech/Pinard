@@ -27,7 +27,7 @@ function extractRegisteredTools(source: string): string[] {
 function extractToolNames(source: string): Map<string, string> {
   const map = new Map<string, string>();
   const toolDefs = source.matchAll(
-    /const\s+(\w+)\s*=\s*defineTool\(\{[^}]*name:\s*"([^"]+)"/gs
+    /const\s+(\w+)\s*=[^;]*?defineTool\(\{[^}]*name:\s*"([^"]+)"/gs
   );
   for (const m of toolDefs) {
     map.set(m[1], m[2]);
@@ -35,17 +35,33 @@ function extractToolNames(source: string): Map<string, string> {
   return map;
 }
 
-const conductorToolDefs = extractToolNames(CONDUCTOR_SRC);
-const conductorRegistered = extractRegisteredTools(CONDUCTOR_SRC);
-const conductorToolNames = conductorRegistered.map(
-  (varName) => conductorToolDefs.get(varName) || varName
-);
-
 const SHARED_SRC = readFileSync(
   join(ROOT, "pi-extension/shared/tools.ts"),
   "utf8"
 );
 const sharedToolDefs = extractToolNames(SHARED_SRC);
+
+const conductorToolDefs = new Map([
+  ...extractToolNames(CONDUCTOR_SRC),
+  ...sharedToolDefs,
+]);
+const conductorRegistered = extractRegisteredTools(CONDUCTOR_SRC);
+const conductorToolNames = conductorRegistered.map(
+  (varName) => conductorToolDefs.get(varName) || varName
+);
+
+const BIN_PINARD_SRC = readFileSync(join(ROOT, "bin/pinard"), "utf8");
+
+function extractPinardToolsAllowlist(source: string): string[] {
+  const match = source.match(/_PINARD_TOOLS="([^"]+)"/);
+  if (!match) return [];
+  return match[1]
+    .split(",")
+    .map((tool) => tool.trim())
+    .filter((tool) => tool && !tool.startsWith("${"));
+}
+
+const pinardToolsAllowlist = extractPinardToolsAllowlist(BIN_PINARD_SRC);
 
 const workerToolDefs = new Map([
   ...extractToolNames(WORKER_SRC),
@@ -59,6 +75,7 @@ const workerToolNames = workerRegistered.map(
 
 const CONDUCTOR_ONLY_TOOLS = [
   "spawn_agent",
+  "respawn_issue",
   "list_workers",
   "kill_worker",
   "interrupt_worker",
@@ -150,6 +167,17 @@ describe("Tool ownership: conductor extension", () => {
         conductorToolNames,
         `conductor should not have ${tool}`
       ).not.toContain(tool);
+    }
+  });
+});
+
+describe("Tool ownership: bin/pinard allowlist drift", () => {
+  it("lists every tool pi-extension/pinard/index.ts registers via pi.registerTool", () => {
+    for (const tool of new Set(conductorToolNames)) {
+      expect(
+        pinardToolsAllowlist,
+        `bin/pinard's _PINARD_TOOLS is missing '${tool}', which is registered via pi.registerTool() in pi-extension/pinard/index.ts — a tool registered but absent from the allowlist is silently hidden from the LLM`
+      ).toContain(tool);
     }
   });
 });

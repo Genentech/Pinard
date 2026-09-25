@@ -1364,3 +1364,79 @@ func TestGitHub_AddSubIssue_PrefixCollision(t *testing.T) {
 		t.Errorf("patched body %q does not contain %q (child was incorrectly treated as duplicate of #50)", patchedBody, wantEntry)
 	}
 }
+
+// TestGitHub_AddLabel_PostsAdditive verifies AddLabel POSTs to the issues
+// labels endpoint (additive per the GitHub API — never replaces the set,
+// unlike SetLabels' PUT).
+func TestGitHub_AddLabel_PostsAdditive(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/issues/42/labels", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[]`))
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	adapter := newTestGHAdapter(srv)
+	if err := adapter.AddLabel(context.Background(), RepoRef{Owner: "owner", Name: "repo"}, 42, "pinard:reviewed"); err != nil {
+		t.Fatalf("AddLabel: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: got %q, want POST", gotMethod)
+	}
+	if gotPath != "/repos/owner/repo/issues/42/labels" {
+		t.Errorf("path: got %q", gotPath)
+	}
+	labels, _ := gotBody["labels"].([]any)
+	if len(labels) != 1 || labels[0] != "pinard:reviewed" {
+		t.Errorf("labels body: got %v, want [\"pinard:reviewed\"]", gotBody["labels"])
+	}
+}
+
+// TestGitHub_RemoveLabel_Deletes verifies RemoveLabel DELETEs the specific
+// label path.
+func TestGitHub_RemoveLabel_Deletes(t *testing.T) {
+	var gotMethod, gotPath string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/issues/42/labels/pinard:reviewed", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[]`))
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	adapter := newTestGHAdapter(srv)
+	if err := adapter.RemoveLabel(context.Background(), RepoRef{Owner: "owner", Name: "repo"}, 42, "pinard:reviewed"); err != nil {
+		t.Fatalf("RemoveLabel: %v", err)
+	}
+	if gotMethod != http.MethodDelete {
+		t.Errorf("method: got %q, want DELETE", gotMethod)
+	}
+	if gotPath != "/repos/owner/repo/issues/42/labels/pinard:reviewed" {
+		t.Errorf("path: got %q", gotPath)
+	}
+}
+
+// TestGitHub_RemoveLabel_404IsSuccess verifies that removing a label the
+// issue/PR doesn't have (404) is treated as a successful no-op — callers
+// invoke this idempotently on every SHA change.
+func TestGitHub_RemoveLabel_404IsSuccess(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/issues/42/labels/pinard:reviewed", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"Label does not exist"}`, http.StatusNotFound)
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	adapter := newTestGHAdapter(srv)
+	if err := adapter.RemoveLabel(context.Background(), RepoRef{Owner: "owner", Name: "repo"}, 42, "pinard:reviewed"); err != nil {
+		t.Errorf("RemoveLabel on a 404 should be a no-op success, got: %v", err)
+	}
+}

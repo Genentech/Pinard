@@ -1,6 +1,11 @@
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import path from "node:path";
+
+function escapeSingleQuotes(s: string): string {
+  return s.replace(/'/g, `'\\''`);
+}
 
 const PROCESS = process.env.BABYSITTER_PROCESS || "";
 const PROCESS_PATH = process.env.BABYSITTER_PROCESS_PATH || "";
@@ -289,6 +294,11 @@ export default function babysitter(pi: ExtensionAPI) {
           return;
         }
 
+        if (action.kind === "node") {
+          driveNodeTask(action);
+          return;
+        }
+
         // Agent or shell task — inject as user message for LLM to execute
         const prompt = formatTaskPrompt(action);
         const taskTitle = action.taskDef?.title || action.taskId || action.effectId;
@@ -298,6 +308,84 @@ export default function babysitter(pi: ExtensionAPI) {
         pi.sendUserMessage(prompt, { deliverAs: initialized ? "followUp" : "steer" });
         return;
       }
+    }
+  }
+
+  // Deterministic `kind:'node'` tasks (issue #342) run a plain script — no LLM
+  // turn, no chance of the model skipping or misreporting the check. Mirrors
+  // the auto-approve breakpoint path: execute synchronously, post the result,
+  // and keep driving the iteration loop.
+  function driveNodeTask(action: any): void {
+    const node = action.taskDef?.node || {};
+    const entry: string = node.entry || "";
+    const nodeArgs: string[] = Array.isArray(node.args) ? node.args : [];
+    const nodeEnv: Record<string, string> = node.env || {};
+    const nodeCwd: string = node.cwd || process.cwd();
+    const timeoutMs: number = typeof node.timeoutMs === "number" ? node.timeoutMs : 15 * 60 * 1000;
+    const taskTitle = action.taskDef?.title || action.taskId || action.effectId;
+    updateStatus(taskTitle);
+    console.error(`[babysitter] Auto-executing node task: ${taskTitle} (${entry})`);
+
+    let entryPath: string;
+    try {
+      entryPath = resolveNodeEntry(entry);
+    } catch (e: any) {
+      console.error(`[babysitter] Node task ${action.effectId}: ${e.message}`);
+      postNodeTaskError(action.effectId, e.message);
+      return;
+    }
+    try {
+      const stdout = execFileSync(process.execPath, [entryPath, ...nodeArgs], {
+        cwd: nodeCwd,
+        env: { ...process.env, ...nodeEnv },
+        timeout: timeoutMs,
+        encoding: "utf8",
+      });
+      const trimmed = stdout.trim();
+      const value = trimmed.length ? JSON.parse(trimmed) : {};
+      bsCli(`task:post "${runDir}" ${action.effectId} --status ok --value-inline '${escapeSingleQuotes(JSON.stringify(value))}'`);
+    } catch (e: any) {
+      const message = e.message || String(e);
+      console.error(`[babysitter] Node task ${action.effectId} (${entry}) failed: ${message}`);
+      postNodeTaskError(action.effectId, message);
+      return;
+    }
+    currentEffectId = null;
+    driveIteration();
+  }
+
+  // A relative node-task `entry` is resolved against process.cwd() first (the
+  // worker's own worktree — the common case for a script that ships inside a
+  // per-project override). If that doesn't exist, fall back to resolving
+  // against the running process file's own directory (BABYSITTER_PROCESS_PATH):
+  // process files like swe.js are shared across every project's spawns via
+  // $PINARD_REPO, and a relative entry hard-coded there must resolve to
+  // *that* file's location, not whatever project happens to be checked out
+  // as cwd. Throws naming both paths tried when neither exists.
+  function resolveNodeEntry(entry: string): string {
+    if (path.isAbsolute(entry)) return entry;
+    const cwdCandidate = path.join(process.cwd(), entry);
+    if (existsSync(cwdCandidate)) return cwdCandidate;
+    if (PROCESS_PATH) {
+      const processDirCandidate = path.join(path.dirname(PROCESS_PATH), entry);
+      if (existsSync(processDirCandidate)) return processDirCandidate;
+      throw new Error(
+        `node task entry "${entry}" not found at "${cwdCandidate}" or "${processDirCandidate}"`,
+      );
+    }
+    throw new Error(`node task entry "${entry}" not found at "${cwdCandidate}" (BABYSITTER_PROCESS_PATH unset, no fallback tried)`);
+  }
+
+  function postNodeTaskError(effectId: string, message: string): void {
+    const fs = require("node:fs");
+    const os = require("node:os");
+    const errorFile = path.join(os.tmpdir(), `babysitter-node-error-${effectId}.json`);
+    fs.writeFileSync(errorFile, JSON.stringify({ name: "NodeTaskError", message }));
+    try {
+      bsCli(`task:post "${runDir}" ${effectId} --status error --error "${errorFile}"`);
+    } catch (postErr: any) {
+      console.error(`[babysitter] Failed to post node task failure: ${postErr.message || postErr} — halting`);
+      processFinished = true;
     }
   }
 

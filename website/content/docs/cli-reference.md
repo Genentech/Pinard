@@ -40,7 +40,25 @@ pinard --restart                   # kill and restart pinard tmux sessions
 ```
 
 The launcher resolves its runtime as **bundled > nvm > PATH**, so a release bundle needs
-no system Node.
+no system Node. On a release/dist build it also prints a `[pinard] build: <tag> /
+<commit> (built <date>)` line at startup (flagged `, DIRTY` for an uncommitted build)
+and exports `PINARD_BUILD` for child processes; a plain source checkout without
+`BUILD_INFO` degrades silently (no line printed).
+
+## `aoc --version` — build provenance
+
+```bash
+aoc --version    # or -v
+# 0.72.0 (abc1234, built 2026-09-25T00:00:00Z)
+```
+
+Version/commit/build-date are baked in via `-ldflags` for `make dist` and release
+builds; a plain `go build`/`go run` falls back to `$PINARD_HOME/BUILD_INFO` (written by
+`make dist` or `./install`) when ldflags weren't injected, or prints `dev (unknown,
+built unknown)` if neither is available. The same commit/tag is baked into published
+Docker/Singularity images as OCI/SIF labels (`org.pinard.commit`, `.tag`, `.built_at`,
+`.dirty`) so `docker inspect` / `singularity inspect` reports provenance without
+running the image.
 
 ## `aoc` — setup
 
@@ -196,7 +214,7 @@ from `vignes.yaml` for the given `--repo`; no flags needed when the repo is regi
 
 `approve-pr` uses `PINARD_OWNER_GITLAB_TOKEN` (the operator’s own PAT, not the bot
 token) so GitLab’s self-approval restriction does not apply. It is a **manual operator
-tool** — Pinard’s automated review path (see [MR Workflow](/docs/mr-workflow/#automated-review-auto_review))
+tool** — Pinard’s automated review path (see [The SWE Process](/docs/swe-process/#automated-maître-review-auto_review))
 never calls it automatically.
 
 `get-pr-changes` outputs one file path per line; useful for scripts and for the
@@ -218,6 +236,32 @@ aoc epic add-child --repo <owner/repo> --parent <N> --child <M>  # attach a chil
 ```bash
 aoc track-mr --session <s> --mr <n> --project <p>   # register an MR with the watcher
 aoc untrack-mr --session <s>                          # stop watching
+```
+
+### `aoc comment-mr` — conductor-marked review comment
+
+Post a comment on a MR with the **conductor marker** appended, so the mr-watcher
+forwards it to the vendangeur as review feedback. The conductor and vendangeur share a
+git-host identity, so a plain `aoc pressoir comment-pr` note is silently dropped —
+`comment-mr` is the policy wrapper that fixes that. Used internally by the `comment_mr`
+maître tool; also callable directly.
+
+```bash
+aoc comment-mr --project <p> --mr <n> --body "<review text>"
+aoc comment-mr --repo <owner/repo> --mr <n> --body "<review text>"
+```
+
+### `aoc mark-mr-reviewed` — silent ALL-CLEAR review ack
+
+Record a "reviewed, nothing to say" ALL-CLEAR on a MR: applies the `pinard:reviewed`
+label (additive, never disturbs other labels) so the mr-watcher stops re-dispatching
+`needs_review` for the current HEAD SHA — without opening a vendangeur turn or posting
+an MR note. **Does not approve the MR** on either forge; approval stays the human
+owner's/forge's responsibility. Used internally by the `mark_mr_reviewed` maître tool.
+
+```bash
+aoc mark-mr-reviewed --project <p> --mr <n>
+aoc mark-mr-reviewed --repo <owner/repo> --mr <n>
 ```
 
 ### `aoc mr-memory` {#aoc-mr-memory}
@@ -248,11 +292,34 @@ aoc list-schedules      # schedules and their last run times
 aoc unschedule --name <name>
 ```
 
+`aoc status`'s worker listing flags agent health derived from the `pinard-agents` KV:
+`⚠ errored: <message>` when the agent's last turn ended in error (a deliberate
+interrupt via `interrupt_worker`/webterm never counts as an error), or `⚠ stalled`
+when it claims to be actively working but hasn't made a real state/tempo/step
+transition in a while (heartbeats alone don't reset the stall clock). The same
+derivation feeds `aoc webterm-doctor`, the maître's `list_workers` tool, and the
+webterm `/sessions` index badge. The stall threshold defaults to 15 minutes —
+override with `PINARD_STALL_MINUTES`.
+
 ## `aoc gc` — agent garbage collector {#aoc-gc}
 
 Reap workers that are done and sweep orphaned tmux socket files. Safe by default:
 never touches conductor/maître/régisseur, open-MR workers, active-turn workers, or
 fresh remote/standalone workers.
+
+**The daemon runs this automatically** — manual `aoc gc` is for on-demand inspection
+(`--dry-run`) rather than the only way workers get reaped:
+
+- **Startup sweep** — one full sweep when the daemon starts, clearing anything left
+  over from a previous run or crash.
+- **Event-driven watcher** — watches `pinard-agents` continuously and reaps an
+  ephemeral/scheduled worker shortly after its turn ends (a `tempo=blocked` grace timer
+  keyed on tempo transitions, not `lastSeen`, since heartbeats stay fresh regardless of
+  tempo).
+- **Daily backstop** — a low-frequency sweep (once per day across restarts) that also
+  covers two checks too heavy/unsafe to run on every tick: completed `--process`
+  workers whose MR reached post-merge but whose `reapWorker` teardown was interrupted,
+  and maître windows left behind for parcelles marked `archived`.
 
 ```bash
 aoc gc                          # reap finished workers + sweep dead sockets
@@ -313,6 +380,9 @@ aoc webterm-doctor --vignoble-name myproject # or as a flag
 Output columns: `VERDICT` (INCLUDE / EXCLUDE / LOCAL / ERROR), `KEY`, and `REASON`
 (e.g. vignoble mismatch, stale lastSeen, missing name, or the role + state for
 included agents). "LOCAL" means the agent appears via tmux listing, not the KV scan.
+Every `INCLUDE` row also appends a health suffix: `compactions=N` (context-compaction
+count for the session) and, when applicable, `errored="<message>"` or `stalled` — the
+same [agent-health](#aoc--status--schedules) derivation used by `aoc status`.
 Deleted/tombstoned KV keys (from normal worker teardown) are skipped silently rather
 than printed as `ERROR` rows; a trailing `(skipped N deleted/tombstoned keys)` line
 reports how many were filtered out.

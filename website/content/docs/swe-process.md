@@ -125,8 +125,10 @@ its own spawns without requiring a separate approval comment.
 | `pinard:awaiting-approval` | Held — owner hasn't approved yet; watcher re-checks each cycle. **Removed automatically** when the owner approves. |
 | `capsule:awaiting-funding` | Capsule-gated — contract detected but not yet funded; see [Buddy Capsules](/docs/capsules/) |
 
-**Retry:** add `pinard:discarded`, then remove it and re-assign — the watcher picks
-it up next cycle.
+**Retry:** an already-`spawned` issue is never re-spawned by the normal poll
+loop on its own. See [Issue Workflow](/docs/issue-workflow/) for `aoc respawn`
+(one atomic command, no waiting) and the `pinard:discarded` manual label
+fallback.
 
 ### Labels that route the work
 
@@ -195,24 +197,54 @@ New reviewer notes are published as `review_comment` events carrying
 dispatched straight to the worker's inbox — including the exact
 `glab api …/discussions/<id>/notes` command to reply in-thread.
 
+### CI pipeline failures
+
+When CI fails, the daemon dispatches a `pipeline_failed` event directly to the
+vendangeur's inbox (attempt X/5) so it can investigate and fix the issue without
+conductor involvement. After 5 consecutive failures on the same MR, a circuit
+breaker trips and the vendangeur is killed rather than looping forever.
+
 ### Automated maître review (`auto_review`)
 
 When CI goes green on a non-draft MR, the daemon notifies the **owning maître** (the
-parcelle conductor) to review the diff and post a signed comment. This is on by
-default — `auto_review: true` — and is independent of auto-merge.
+parcelle conductor) to review the diff. This is on by default — `auto_review: true`
+— and is independent of auto-merge. It gives the operator confidence that a Pinard
+maître looked at every change, whether or not the vigne is set to auto-merge.
 
-The maître uses `aoc pressoir get-pr-changes` to enumerate changed files and posts a
-review comment signed `🍇 Reviewed by the <parcelle> maître`. Reviews are
-idempotent: a new review only fires when the MR HEAD SHA changes (i.e. after a new
-push). Trivial MRs (docs sync, image/chart bumps, reverts) are skipped automatically.
+The maître uses `aoc pressoir get-pr-changes` to enumerate changed files and
+`aoc pressoir list-pr-notes` to read existing review comments, then chooses one of two
+outcomes — never a raw `aoc pressoir comment-pr`/`approve-pr` call:
 
-**Pinard does not approve MRs automatically.** Approval remains the human owner's
-or forge's responsibility. `aoc pressoir approve-pr` is available as a manual CLI
-tool for operators acting on explicit instruction only.
+- **Actionable feedback → `comment_mr`.** Posts a comment signed `🍇 Reviewed by the
+  <parcelle> maître`, wrapped by `aoc comment-mr` so it carries the conductor marker.
+  The conductor and vendangeur share a git-host identity, so an unmarked note would be
+  silently dropped by the mr-watcher; the marker is what makes it forward to the
+  vendangeur as review feedback.
+- **Nothing to say (ALL-CLEAR) → `mark_mr_reviewed`.** Applies the `pinard:reviewed`
+  label (via `aoc mark-mr-reviewed`) and stops — no vendangeur turn, no MR note. This
+  keeps a genuine LGTM from waking the vendangeur for nothing.
 
-Opt out per-vigne or vignoble-wide with `auto_review: false` in `vignes.yaml`. See
-**[MR Workflow](/docs/mr-workflow/)** for the full lifecycle, idempotency details,
-and approval policy.
+**Pinard does not approve MRs automatically, on either path.** `mark_mr_reviewed`
+only applies the label; approval remains the human owner's or forge's responsibility.
+`aoc pressoir approve-pr` is available as a manual CLI tool for operators acting on
+explicit instruction only — never invoked from this automatic path.
+
+Reviews are **idempotent**: the watcher tracks the `pinard:reviewed` label against the
+current MR HEAD SHA, so a new review only fires after a new push (a stale label from an
+older SHA is cleared before a fresh dispatch). A **noise filter** skips trivial and
+mechanical MRs automatically — docs sync (`sync Ledger`), image/chart bumps
+(`bump-image`, `bump-chart`), and reverts never trigger a full maître review turn.
+
+Opt out per-vigne or vignoble-wide with `auto_review: false` in `vignes.yaml`:
+
+```yaml
+# Vignoble-level opt-out (all vignes)
+auto_review: false
+
+vignes:
+  my-project:
+    auto_review: false  # Per-vigne opt-out
+```
 
 ### Auto-merge (optional)
 
@@ -220,17 +252,22 @@ and approval policy.
 [`vignes.yaml`](/docs/configuration/) (per-vigne or global), the watcher merges once
 **all** hold: pipeline **success**, at least one **approval**, **no unresolved
 threads**, and **not a Draft**. If unapproved, a `needs_approval` event goes to the
-conductor. With auto-merge off, none of this runs.
+conductor. With auto-merge off, none of this runs — the human merges after seeing the
+maître's review (comment or silent label).
 
 ### Post-merge & reap
 
-After merge, the watcher monitors the main and tag pipelines (reporting to the
-conductor), and finally calls **`reapWorker`** — the single, deterministic teardown
-point that kills the tmux session and cleans up the worktree.
+When `monitor_post_merge: true` (the default), the watcher monitors the main and tag
+pipelines triggered by the merge commit, reporting to the conductor. On success (or
+when post-merge monitoring is disabled), it finally calls **`reapWorker`** — the
+single, deterministic teardown point that kills the tmux session and cleans up the
+worktree. On a post-merge main-pipeline failure, a `main_pipeline_failed` event is
+dispatched to the vendangeur's inbox instead, and the reap is held until that's
+resolved.
 
 ## See also
 
-- **[MR Workflow](/docs/mr-workflow/)** — full MR lifecycle: auto-review, approval policy, CI failures, post-merge monitoring.
+- **[Issue Workflow](/docs/issue-workflow/)** — respawning an already-spawned issue, and the label-driven manual fallback.
 - **[Authoring Processes](/docs/authoring-processes/)** — write your own loop.
 - **[Orchestration & Parcelles](/docs/orchestration/)** — group SWE work into workstreams.
 - **[Configuration](/docs/configuration/)** — `auto_merge`, `auto_review`, and other toggles.

@@ -16,11 +16,21 @@ REPO_DIR="${BUILD_INFO_REPO:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")
 if git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
   COMMIT_SHORT="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  TAG="$(git -C "$REPO_DIR" describe --tags --always --dirty 2>/dev/null || echo unknown)"
-  if git -C "$REPO_DIR" diff-index --quiet HEAD -- 2>/dev/null; then
+  # Exclude git-annex-tracked SIF images from the dirty check: the SIF build
+  # overwrites their annex pointers with real image content mid-build, which
+  # would otherwise stamp DIRTY on every build after the first one (#325).
+  # DIRTY should describe *source* state, not build artifacts.
+  if git -C "$REPO_DIR" diff-index --quiet HEAD -- . ':(exclude)dist/singularity/*.sif' 2>/dev/null; then
     DIRTY=false
   else
     DIRTY=true
+  fi
+  # `git describe --dirty` has no pathspec-exclude support, so it can't share
+  # the exclusion above — derive TAG's dirty suffix from our own DIRTY instead,
+  # keeping TAG and DIRTY in agreement.
+  TAG="$(git -C "$REPO_DIR" describe --tags --always 2>/dev/null || echo unknown)"
+  if [[ "$DIRTY" == true && "$TAG" != unknown ]]; then
+    TAG="${TAG}-dirty"
   fi
 else
   COMMIT=unknown

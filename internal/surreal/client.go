@@ -347,6 +347,7 @@ func entityRID(role, name string) string {
 //   - option<array<float>> fields only accept NONE or a real array; JSON null
 //     maps to SurrealDB NULL which the type-checker rejects. Emit the NONE
 //     keyword in SurrealQL when embedding is absent rather than binding nil.
+//
 // upsertEntityPrecheck checks if an entity exists and has manual_edit=true.
 // Returns (true, nil) if we should preserve existing description/embedding.
 func (c *Client) upsertEntityPrecheck(rid string) (bool, error) {
@@ -1063,6 +1064,85 @@ func (c *Client) FetchAllAutoServeWikiDocs() ([]map[string]any, error) {
 		`SELECT path, title, body, summary, confidence, frontmatter, updated_at FROM wiki_doc WHERE status='auto_serve'`,
 		nil,
 	)
+}
+
+// entityIDPart strips the "entity:" table prefix from a full record ID string
+// (e.g. entityRecordID's output), returning just the id component expected by
+// type::record('entity', $id).
+func entityIDPart(fullID string) string {
+	if i := strings.Index(fullID, ":"); i >= 0 {
+		return fullID[i+1:]
+	}
+	return fullID
+}
+
+// WriteWikiMentions replaces the wiki_mentions edges from the wiki_doc at path
+// to entityIDs (full "entity:<id>" record IDs), so the doc's source entities
+// can later be looked up by FindWikiDocByEntities instead of re-deriving the
+// doc's identity from its title. Existing outbound edges for the doc are
+// dropped first so entities no longer contributing to it are unlinked.
+func (c *Client) WriteWikiMentions(wikiPath string, entityIDs []string) error {
+	rid := fmt.Sprintf("%x", sha256.Sum256([]byte("wiki_doc\x00"+wikiPath)))[:32]
+	if _, err := c.queryOne(
+		`DELETE wiki_mentions WHERE in = type::record('wiki_doc',$rid)`,
+		map[string]any{"rid": rid},
+	); err != nil {
+		return err
+	}
+	for _, eid := range entityIDs {
+		idPart := entityIDPart(eid)
+		if idPart == "" {
+			continue
+		}
+		if _, err := c.queryOne(
+			`RELATE (type::record('wiki_doc',$rid))->wiki_mentions->(type::record('entity',$eid))`,
+			map[string]any{"rid": rid, "eid": idPart},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pluralityPath returns the key with the highest count in counts, breaking
+// ties by the lexicographically smallest key for deterministic results.
+// Returns "" for an empty map.
+func pluralityPath(counts map[string]int) string {
+	best := ""
+	bestCount := 0
+	for path, n := range counts {
+		if n > bestCount || (n == bestCount && path < best) {
+			best = path
+			bestCount = n
+		}
+	}
+	return best
+}
+
+// FindWikiDocByEntities returns the path of the wiki_doc most already linked
+// (via wiki_mentions) to entityIDs — the plurality of the cluster's entities —
+// or ("", nil) when none of them are yet linked to any doc (a genuinely new
+// concept, or a pre-existing doc that hasn't been adopted yet).
+func (c *Client) FindWikiDocByEntities(entityIDs []string) (string, error) {
+	if len(entityIDs) == 0 {
+		return "", nil
+	}
+	rows, err := c.queryOne(
+		`SELECT in.path AS path FROM wiki_mentions WHERE out IN $eids`,
+		map[string]any{"eids": entityIDs},
+	)
+	if err != nil {
+		return "", err
+	}
+	counts := map[string]int{}
+	for _, row := range rows {
+		p, _ := row["path"].(string)
+		if p == "" {
+			continue
+		}
+		counts[p]++
+	}
+	return pluralityPath(counts), nil
 }
 
 // FetchEntityEdges returns typed outbound edges for the given entity record ID.

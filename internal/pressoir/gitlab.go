@@ -344,6 +344,21 @@ func (a *GitLabAdapter) SetLabels(ctx context.Context, repo RepoRef, number int,
 	})
 }
 
+// AddLabel and RemoveLabel target the merge_requests endpoint (not issues,
+// which SetLabels above uses) via add_labels/remove_labels params, so they
+// work correctly on MRs and never replace the existing label set.
+func (a *GitLabAdapter) AddLabel(ctx context.Context, repo RepoRef, number int, label string) error {
+	return a.client.UpdateMR(repoPath(repo), number, map[string]string{
+		"add_labels": label,
+	})
+}
+
+func (a *GitLabAdapter) RemoveLabel(ctx context.Context, repo RepoRef, number int, label string) error {
+	return a.client.UpdateMR(repoPath(repo), number, map[string]string{
+		"remove_labels": label,
+	})
+}
+
 func (a *GitLabAdapter) ListIssueNotes(ctx context.Context, repo RepoRef, number int) ([]Comment, error) {
 	notes, err := a.client.ListIssueNotes(repoPath(repo), number)
 	if err != nil {
@@ -405,6 +420,7 @@ func (a *GitLabAdapter) Capabilities(ctx context.Context) Capabilities {
 
 func (a *GitLabAdapter) WorkerGuidance(repo, host, encodedRepo, targetBranch, user, project, name string) string {
 	return fmt.Sprintf(`- To open a merge request use: aoc pressoir open-pr --repo %s --src $(git branch --show-current) --dst %s --title "your title" --body "your description"
+- MR titles must start with fix:/feat: (scope optional): "fix(ci): …", "feat: …". Other prefixes (docs:, chore:, ops:) are rejected.
 - When you open an MR: (1) call track_mr with the MR number so review comments reach you, (2) run: aoc notify "[%s] Opened MR !<number> on %s: https://%s/%s/-/merge_requests/<number>"
 - When you finish a task or address review feedback, run: aoc notify "[%s] <summary of what you did>"
 - To comment on a merge request: aoc pressoir comment-pr --repo %s --number <iid> --body "<comment>"

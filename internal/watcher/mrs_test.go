@@ -541,6 +541,29 @@ func TestMRWatcher_UnmarkedConductorNoteSkipped_MarkedForwarded(t *testing.T) {
 	}
 }
 
+// BUG REGRESSION (#335): `mark_mr_reviewed` now posts an unmarked, human-visible
+// note (via cmd/aoc's buildReviewedNoteBody) naming the reviewing maître and a
+// summary of what was checked, alongside the `pinard:reviewed` label. That note
+// must remain invisible to the agent pipeline — no vendangeur turn, no
+// re-dispatch — exactly like the #305 case above, verified against the real
+// shouldForwardNote predicate rather than a local reimplementation.
+func TestMRWatcher_ReviewedAllClearNoteSkipped(t *testing.T) {
+	w := &MRWatcher{IgnoredAuthors: map[string]bool{"pinard": true}}
+
+	note := gitlab.Note{
+		ID:     1,
+		Body:   "🍇 Reviewed by the pinard maître — verified all six hardcoded sites plus ls-remote --symref and the error-on-indeterminate path.",
+		System: false,
+		Author: gitlab.Author{Username: "pinard"},
+	}
+	if w.shouldForwardNote(note) {
+		t.Error("mark_mr_reviewed's unmarked ALL-CLEAR note must be skipped, not forwarded to the vendangeur")
+	}
+	if strings.Contains(note.Body, ConductorMarker) {
+		t.Fatal("test note must not carry ConductorMarker — that would defeat the point of this regression test")
+	}
+}
+
 // ── Tests for process-worker identity split (issue #144) ──────────────────
 //
 // A process worker has two identities:

@@ -304,6 +304,10 @@ func (a *GitHubAdapter) ghPut(ctx context.Context, path string, payload any, res
 	return a.ghMutate(ctx, http.MethodPut, path, payload, result)
 }
 
+func (a *GitHubAdapter) ghDelete(ctx context.Context, path string) error {
+	return a.ghMutate(ctx, http.MethodDelete, path, nil, nil)
+}
+
 func (a *GitHubAdapter) ghMutate(ctx context.Context, method, path string, payload any, result any) error {
 	var bodyReader io.Reader
 	if payload != nil {
@@ -1154,6 +1158,25 @@ func (a *GitHubAdapter) SetLabels(ctx context.Context, repo RepoRef, number int,
 	return a.ghPut(ctx, fmt.Sprintf("%s/issues/%d/labels", ghRepoPath(repo), number), payload, nil)
 }
 
+// AddLabel adds a single label without disturbing existing ones (unlike
+// SetLabels, which replaces the full set). GitHub auto-creates an unknown
+// label on first use.
+func (a *GitHubAdapter) AddLabel(ctx context.Context, repo RepoRef, number int, label string) error {
+	payload := map[string]any{"labels": []string{label}}
+	return a.ghPost(ctx, fmt.Sprintf("%s/issues/%d/labels", ghRepoPath(repo), number), payload, nil)
+}
+
+// RemoveLabel removes a single label. A 404 (label not present on the
+// issue/PR) is treated as a successful no-op, since callers invoke this
+// idempotently regardless of whether the label was ever applied.
+func (a *GitHubAdapter) RemoveLabel(ctx context.Context, repo RepoRef, number int, label string) error {
+	err := a.ghDelete(ctx, fmt.Sprintf("%s/issues/%d/labels/%s", ghRepoPath(repo), number, url.PathEscape(label)))
+	if err != nil && strings.Contains(err.Error(), ": 404 ") {
+		return nil
+	}
+	return err
+}
+
 // ListIssueNotes returns top-level comments on a GitHub issue.
 // GET /repos/{owner}/{repo}/issues/{number}/comments
 func (a *GitHubAdapter) ListIssueNotes(ctx context.Context, repo RepoRef, number int) ([]Comment, error) {
@@ -1284,6 +1307,7 @@ func (a *GitHubAdapter) Capabilities(_ context.Context) Capabilities {
 
 func (a *GitHubAdapter) WorkerGuidance(repo, host, encodedRepo, targetBranch, user, project, name string) string {
 	return fmt.Sprintf(`- To open a pull request use: aoc pressoir open-pr --repo %s --src $(git branch --show-current) --dst %s --title "your title" --body "your description"
+- MR titles must start with fix:/feat: (scope optional): "fix(ci): …", "feat: …". Other prefixes (docs:, chore:, ops:) are rejected.
 - When you open a PR: (1) call track_mr with the PR number so review comments reach you, (2) run: aoc notify "[%s] Opened PR #<number> on %s: https://%s/%s/pull/<number>"
 - When you finish a task or address review feedback, run: aoc notify "[%s] <summary of what you did>"
 - To comment on a pull request: aoc pressoir comment-pr --repo %s --number <number> --body "<comment>"

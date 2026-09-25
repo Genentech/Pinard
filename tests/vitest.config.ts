@@ -7,6 +7,7 @@ export default defineConfig({
       "@pinard/logic": resolve(__dirname, "../lib/logic.ts"),
       "@pinard/classify": resolve(__dirname, "../lib/classify.ts"),
       "@pinard/teaching": resolve(__dirname, "../lib/teaching.ts"),
+      "@pinard/log-rotate": resolve(__dirname, "../lib/logRotate.ts"),
     },
   },
   test: {

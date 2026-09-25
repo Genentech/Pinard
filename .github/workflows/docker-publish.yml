@@ -64,6 +64,14 @@ jobs:
           # Build from the tag (workflow_dispatch passes it explicitly; a tag
           # push resolves via github.ref).
           ref: ${{ github.event.inputs.tag || github.ref }}
+          # deps/babysitter is a git submodule; actions/checkout defaults to
+          # not fetching submodules, which leaves it empty. dist/build.sh's
+          # bootstrap only runs `git submodule update --init` as a fallback
+          # when deps/babysitter/package.json is missing, and that fallback
+          # can't work anyway since .dockerignore excludes .git from the
+          # Docker build context — so the submodule must already be populated
+          # by the time `docker build` runs.
+          submodules: recursive
 
       - name: Set up QEMU (for multi-arch)
         uses: docker/setup-qemu-action@v3

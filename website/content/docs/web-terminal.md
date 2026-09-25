@@ -187,6 +187,16 @@ self-served responder rather than the local daemon). A vignoble with no live loc
 still shows any recently-active remote workers from the KV; it degrades gracefully rather
 than erroring. Scoped (signed-link) viewers never see the index — it's operators only.
 
+Each row also carries a **🏷️ build badge** (hover for the exact tag/commit the agent is
+running) and an **agent-health badge**: **⚠️ errored** when the agent's last turn ended in
+error (hover for the truncated error message), or **⚠️ stalled** when it claims to be
+actively working but hasn't made a real state/tempo/step transition in a while —
+heartbeats alone don't reset the stall clock, so a wedged turn is told apart from one
+that's genuinely progressing. A deliberate interrupt (via the header's ⛔ button, or the
+conductor's `interrupt_worker` tool) is never classified as an error. The stall
+threshold defaults to 15 minutes; override with `PINARD_STALL_MINUTES` on the daemon
+host. The same derivation backs `aoc status` and `aoc webterm-doctor`.
+
 ## Configuration
 
 The `webterm:` block in `credentials.yaml` holds `base_url`, the link/grant/cookie
