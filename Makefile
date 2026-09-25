@@ -25,8 +25,12 @@ typecheck:
 
 # Build the single-file Linux/glibc distribution: dist/pinard-linux-x64.run
 # Bundles aoc + launcher + extensions + a vendored Node/Pi runtime.
+# PINARD_BUILD_TAGS=capsule bakes in the real Genentech-only capsule
+# implementation for the internal .run / SIF images; the OSS Docker build
+# runs dist/build.sh directly (no Makefile, no env var) and stays tag-less,
+# since the capsule source is dropped from the public export.
 dist:
-	bash dist/build.sh
+	PINARD_BUILD_TAGS=capsule bash dist/build.sh
 
 clean-dist:
 	rm -rf dist/stage dist/pinard-linux-x64.run

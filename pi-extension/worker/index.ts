@@ -9,6 +9,7 @@ if (!globalThis.WebSocket) (globalThis as any).WebSocket = WebSocket;
 import { jetstream, type JetStreamClient } from "@nats-io/jetstream";
 import { Kvm, type KV } from "@nats-io/kv";
 import { registerProxyProvider, seedProxyAuth } from "../shared/provider.js";
+import { classifyTurnStopReason } from "../../lib/logic.js";
 
 const NATS_URL = process.env.PINARD_NATS_URL || "";
 const NATS_CREDS = process.env.PINARD_NATS_CREDS || "";
@@ -80,6 +81,14 @@ let js: JetStreamClient | null = null;
 let kvAgents: KV | null = null;
 let piRef: ExtensionAPI | null = null;
 let currentCtx: any = null;
+// Set when WE call ctx.abort() (conductor interrupt_worker / webterm CtlInterrupt,
+// both delivered over the .interrupt subject below). A deliberate abort can
+// surface in turn_end as stopReason "error" with an errorMessage rather than
+// pi's own "aborted" stopReason (see #323 review) — this timestamp lets turn_end
+// suppress error classification for a short grace window so an operator
+// interrupt never paints a spurious errored/stalled badge.
+let abortRequestedAt: number | undefined;
+const ABORT_GRACE_MS = 10_000;
 let inboxSub: Subscription | null = null;
 let btwSub: Subscription | null = null;
 let interruptSub: Subscription | null = null;
@@ -211,9 +220,22 @@ function natsPublish(subject: string, data: Record<string, any>): void {
 // "open-mr", "completed"). Persisted so turn_start/turn_end don't clear it.
 let lastStep = "";
 let lastStateTempo = { state: "running", tempo: "active" };
+// Turn-error tracking (#323): set on an abnormal turn_end, cleared optimistically
+// on the next turn_start. `compactions` counts session_compact events for the life
+// of the process. `lastTransitionAt` records when state/tempo/step last actually
+// changed — distinct from lastSeen, which the heartbeat refreshes every 60s
+// regardless of activity — so a wedged turn can be detected downstream.
+let lastError: string | undefined;
+let erroredAt: string | undefined;
+let compactions = 0;
+let lastTransitionAt: string | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 const HEARTBEAT_INTERVAL_MS = 60_000; // 1 minute — keeps lastSeen fresh for the /sessions index
+
 async function publishState(state: string, tempo: string, step?: string): Promise<void> {
+  const transitioned = state !== lastStateTempo.state || tempo !== lastStateTempo.tempo ||
+    (step !== undefined && step !== lastStep);
+  if (transitioned || !lastTransitionAt) lastTransitionAt = new Date().toISOString();
   if (step !== undefined) lastStep = step;
   lastStateTempo = { state, tempo };
   if (!kvAgents) return;
@@ -231,6 +253,7 @@ async function publishState(state: string, tempo: string, step?: string): Promis
         const workerFields = new Set([
           "project", "name", "agentId", "runId", "process", "parcelle",
           "state", "tempo", "step", "cwd", "vignoble", "issueUrl", "host", "standalone", "build", "lastSeen",
+          "lastError", "erroredAt", "compactions", "lastTransitionAt",
         ]);
         for (const [k, v] of Object.entries(parsed)) {
           if (!workerFields.has(k)) preserved[k] = v;
@@ -260,6 +283,10 @@ async function publishState(state: string, tempo: string, step?: string): Promis
       standalone: IS_STANDALONE || undefined,
       build: BUILD || undefined,
       lastSeen: new Date().toISOString(),
+      lastError: lastError || undefined,
+      erroredAt: erroredAt || undefined,
+      compactions,
+      lastTransitionAt,
     }));
   } catch (e: any) {
     const msg = e?.message ?? String(e);
@@ -475,6 +502,7 @@ function subscribeInterrupt(): void {
         const reason = data.reason || "Interrupted by conductor";
 
         if (currentCtx && !currentCtx.isIdle?.()) {
+          abortRequestedAt = Date.now();
           currentCtx.abort?.();
         }
         if (piRef) {
@@ -1135,12 +1163,23 @@ export default function worker(pi: ExtensionAPI) {
 
   pi.on("turn_start", async (_event: any, ctx: any) => {
     currentCtx = ctx;
+    // A fresh turn beginning means the agent isn't stuck on the prior failure;
+    // clear optimistically and let turn_end re-flag it if this turn errors too.
+    lastError = undefined;
+    erroredAt = undefined;
     await publishState("running", "active");
   });
 
   pi.on("turn_end", async (event: any) => {
     currentCtx = null;
-    await publishState("running", "blocked");
+    const recentAbort = abortRequestedAt !== undefined && Date.now() - abortRequestedAt < ABORT_GRACE_MS;
+    abortRequestedAt = undefined;
+    const classified = classifyTurnStopReason(event?.message?.stopReason, event?.message?.errorMessage, recentAbort);
+    if (classified.tempo === "errored") {
+      lastError = classified.lastError;
+      erroredAt = new Date().toISOString();
+    }
+    await publishState("running", classified.tempo);
     if (capsuleStatsURL) {
       const usage = event?.message?.usage;
       if (usage) {
@@ -1181,6 +1220,8 @@ export default function worker(pi: ExtensionAPI) {
 
   pi.on("session_compact", async () => {
     if (capsuleStatsURL) capsuleCompactions++;
+    compactions++;
+    void publishState(lastStateTempo.state, lastStateTempo.tempo);
   });
 
   pi.on("notification", async (event: any, _ctx: any) => {

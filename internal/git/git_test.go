@@ -104,6 +104,84 @@ func TestDefaultBranch(t *testing.T) {
 	}
 }
 
+// TestDefaultBranch_NoOriginHead verifies that DefaultBranch falls back to
+// `git ls-remote --symref` (instead of a hardcoded guess) when the checkout has
+// no local origin/HEAD ref — e.g. a checkout built via init+remote+fetch rather
+// than clone, or one re-pointed at a new remote. It also verifies the self-heal:
+// origin/HEAD is set afterwards so the fast path resolves on the next call.
+func TestDefaultBranch_NoOriginHead(t *testing.T) {
+	tmp := t.TempDir()
+	bareDir := filepath.Join(tmp, "origin.git")
+	wdDir := filepath.Join(tmp, "init-wd")
+	checkoutDir := filepath.Join(tmp, "checkout")
+
+	mustRun(t, "", "git", "init", "--bare", bareDir)
+
+	mustRun(t, "", "git", "init", wdDir)
+	mustRun(t, wdDir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, wdDir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(wdDir, "README"), []byte("init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, wdDir, "git", "add", "README")
+	mustRun(t, wdDir, "git", "commit", "-m", "init")
+
+	// Use a branch name that is deliberately not "main", to catch any
+	// hardcoded fallback.
+	const realDefault = "trunk"
+	mustRun(t, wdDir, "git", "branch", "-m", realDefault)
+	mustRun(t, wdDir, "git", "remote", "add", "origin", bareDir)
+	mustRun(t, wdDir, "git", "push", "-u", "origin", realDefault)
+	mustRun(t, bareDir, "git", "symbolic-ref", "HEAD", "refs/heads/"+realDefault)
+
+	// Build the checkout via init+remote+fetch, which never creates
+	// refs/remotes/origin/HEAD (unlike `git clone`).
+	mustRun(t, "", "git", "init", checkoutDir)
+	mustRun(t, checkoutDir, "git", "remote", "add", "origin", bareDir)
+	mustRun(t, checkoutDir, "git", "fetch", "origin")
+	mustRun(t, checkoutDir, "git", "config", "user.email", "test@example.com")
+	mustRun(t, checkoutDir, "git", "config", "user.name", "Test")
+
+	if _, err := run(checkoutDir, "rev-parse", "--abbrev-ref", "origin/HEAD"); err == nil {
+		t.Fatal("expected origin/HEAD to be unset before DefaultBranch is called")
+	}
+
+	got, err := DefaultBranch(checkoutDir)
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != realDefault {
+		t.Errorf("expected %q, got %q", realDefault, got)
+	}
+
+	// Self-heal: origin/HEAD should now resolve locally.
+	healed, err := run(checkoutDir, "rev-parse", "--abbrev-ref", "origin/HEAD")
+	if err != nil {
+		t.Fatalf("expected origin/HEAD to be set after DefaultBranch self-heal, got error: %v", err)
+	}
+	if strings.TrimPrefix(healed, "origin/") != realDefault {
+		t.Errorf("expected self-healed origin/HEAD to point at %q, got %q", realDefault, healed)
+	}
+}
+
+// TestDefaultBranch_UnreachableRemote verifies that DefaultBranch returns an
+// error — never a hardcoded guess — when the remote's default branch cannot be
+// determined.
+func TestDefaultBranch_UnreachableRemote(t *testing.T) {
+	tmp := t.TempDir()
+	checkoutDir := filepath.Join(tmp, "checkout")
+	mustRun(t, "", "git", "init", checkoutDir)
+	mustRun(t, checkoutDir, "git", "remote", "add", "origin", filepath.Join(tmp, "does-not-exist.git"))
+
+	got, err := DefaultBranch(checkoutDir)
+	if err == nil {
+		t.Fatalf("expected error for unreachable remote, got branch %q", got)
+	}
+	if got == "main" || got == "master" {
+		t.Errorf("must not fall back to a hardcoded branch name, got %q", got)
+	}
+}
+
 // TestEnsureRemoteBranch_MissingBranch verifies that EnsureRemoteBranch creates
 // the branch on origin when it is absent, and that the remote-tracking ref exists
 // locally afterwards.

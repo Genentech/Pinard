@@ -49,6 +49,16 @@ func WorktreeRemove(dir, path string) error {
 	return err
 }
 
+func WorktreePrune(dir string) error {
+	_, err := run(dir, "worktree", "prune")
+	return err
+}
+
+func DeleteBranch(dir, name string) error {
+	_, err := run(dir, "branch", "-D", name)
+	return err
+}
+
 func CurrentBranch(dir string) (string, error) {
 	return run(dir, "rev-parse", "--abbrev-ref", "HEAD")
 }
@@ -81,15 +91,39 @@ func RemoteBranchExists(dir, remote, branch string) bool {
 }
 
 // DefaultBranch returns the default branch name of origin (e.g. "main" or "master").
-// It resolves origin/HEAD; falls back to "main" if unset.
+// It resolves the local origin/HEAD symbolic ref if set (cheap, no network); if
+// unset (e.g. a checkout provisioned by init+fetch or re-pointed to a new remote
+// rather than freshly cloned), it queries the remote directly via
+// `git ls-remote --symref origin HEAD` and self-heals by writing origin/HEAD so
+// subsequent calls resolve locally. It never guesses a hardcoded branch name; if
+// the remote is unreachable or its HEAD is indeterminate, it returns an error.
 func DefaultBranch(dir string) (string, error) {
-	out, err := run(dir, "rev-parse", "--abbrev-ref", "origin/HEAD")
-	if err != nil || out == "" || out == "origin/HEAD" {
-		// origin/HEAD may not be set; fall back to main.
-		return "main", nil
+	if out, err := run(dir, "rev-parse", "--abbrev-ref", "origin/HEAD"); err == nil && out != "" && out != "origin/HEAD" {
+		return strings.TrimPrefix(out, "origin/"), nil
 	}
-	// Strip the "origin/" prefix to get just the branch name.
-	return strings.TrimPrefix(out, "origin/"), nil
+
+	out, err := run(dir, "ls-remote", "--symref", "origin", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolve default branch: ls-remote origin HEAD: %w", err)
+	}
+
+	var branch string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 3 && fields[0] == "ref:" && fields[2] == "HEAD" {
+			branch = strings.TrimPrefix(fields[1], "refs/heads/")
+			break
+		}
+	}
+	if branch == "" {
+		return "", fmt.Errorf("resolve default branch: origin HEAD is indeterminate (ls-remote --symref returned no ref: line)")
+	}
+
+	// Self-heal: cache the resolved default so future calls hit the fast path.
+	// Best-effort — failure here does not affect the result.
+	run(dir, "remote", "set-head", "origin", branch)
+
+	return branch, nil
 }
 
 // EnsureRemoteBranch creates the named branch on origin (off the default branch)

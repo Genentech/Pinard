@@ -130,11 +130,11 @@ func TestIntegrationUpsertAndRecall(t *testing.T) {
 	defer db.Close()
 
 	type corpusEntity struct {
-		ObsID    string `json:"obs_id"`
-		ObsType  string `json:"obs_type"`
-		Role     string `json:"role"`
-		Name     string `json:"name"`
-		Content  string `json:"content"`
+		ObsID   string `json:"obs_id"`
+		ObsType string `json:"obs_type"`
+		Role    string `json:"role"`
+		Name    string `json:"name"`
+		Content string `json:"content"`
 	}
 	type goldenRecall struct {
 		Entities []corpusEntity `json:"entities"`
@@ -448,4 +448,171 @@ func containsStr(s, substr string) bool {
 		}
 		return false
 	})()
+}
+
+// TestIntegrationFindWikiDocByEntities_StableAcrossRetitling (#320): once an
+// entity is linked to a doc via wiki_mentions, looking it up must return the
+// original path even though the would-be slug from a reworded title differs —
+// re-titling a concept must NOT create a second page.
+func TestIntegrationFindWikiDocByEntities_StableAcrossRetitling(t *testing.T) {
+	db := integrationClient(t, "ci-wiki-mentions-retitle")
+	defer db.Close()
+
+	if _, err := db.UpsertEntity("decision", "retitle-entity-A", "desc", nil, nil, "1.0.0", "test"); err != nil {
+		t.Fatalf("upsert entity: %v", err)
+	}
+	eid := "entity:" + entityRID("decision", "retitle-entity-A")
+
+	originalPath := "decisions/conductor-led-live-surrealdb-smoke-testing"
+	if _, err := db.UpsertWikiDoc("Conductor-led live SurrealDB smoke testing", "body", originalPath, "summary", 0.9,
+		map[string]any{"type": "decision"}, nil); err != nil {
+		t.Fatalf("UpsertWikiDoc: %v", err)
+	}
+	if err := db.WriteWikiMentions(originalPath, []string{eid}); err != nil {
+		t.Fatalf("WriteWikiMentions: %v", err)
+	}
+
+	// A resynthesis with a reworded title would slug to a different path, but
+	// the edge-based lookup must still resolve back to originalPath.
+	got, err := db.FindWikiDocByEntities([]string{eid})
+	if err != nil {
+		t.Fatalf("FindWikiDocByEntities: %v", err)
+	}
+	if got != originalPath {
+		t.Errorf("FindWikiDocByEntities = %q, want %q (stable identity)", got, originalPath)
+	}
+}
+
+// TestIntegrationFindWikiDocByEntities_Plurality (#320): when a cluster's
+// entities are split across two existing docs' edges, the doc with the
+// plurality of the cluster's entities wins.
+func TestIntegrationFindWikiDocByEntities_Plurality(t *testing.T) {
+	db := integrationClient(t, "ci-wiki-mentions-plurality")
+	defer db.Close()
+
+	names := []string{"plurality-entity-A", "plurality-entity-B", "plurality-entity-C"}
+	eids := make([]string, len(names))
+	for i, n := range names {
+		if _, err := db.UpsertEntity("decision", n, "desc", nil, nil, "1.0.0", "test"); err != nil {
+			t.Fatalf("upsert entity %s: %v", n, err)
+		}
+		eids[i] = "entity:" + entityRID("decision", n)
+	}
+
+	majorityPath := "decisions/plurality-majority-doc"
+	minorityPath := "decisions/plurality-minority-doc"
+	for _, p := range []string{majorityPath, minorityPath} {
+		if _, err := db.UpsertWikiDoc("title", "body", p, "summary", 0.9, map[string]any{"type": "decision"}, nil); err != nil {
+			t.Fatalf("UpsertWikiDoc %s: %v", p, err)
+		}
+	}
+	// A and B point to majorityPath, C points to minorityPath.
+	if err := db.WriteWikiMentions(majorityPath, eids[:2]); err != nil {
+		t.Fatalf("WriteWikiMentions majority: %v", err)
+	}
+	if err := db.WriteWikiMentions(minorityPath, eids[2:]); err != nil {
+		t.Fatalf("WriteWikiMentions minority: %v", err)
+	}
+
+	got, err := db.FindWikiDocByEntities(eids)
+	if err != nil {
+		t.Fatalf("FindWikiDocByEntities: %v", err)
+	}
+	if got != majorityPath {
+		t.Errorf("FindWikiDocByEntities = %q, want %q (plurality)", got, majorityPath)
+	}
+}
+
+// TestIntegrationWriteWikiMentions_EdgeChurnSurvivesEntityDeletion (#320): when
+// a subsequent call passes a reduced entity set (simulating entity deletion),
+// the previously-linked entities no longer resolve to the doc, but the doc's
+// own `path` field is untouched.
+func TestIntegrationWriteWikiMentions_EdgeChurnSurvivesEntityDeletion(t *testing.T) {
+	db := integrationClient(t, "ci-wiki-mentions-churn")
+	defer db.Close()
+
+	names := []string{"churn-entity-A", "churn-entity-B"}
+	eids := make([]string, len(names))
+	for i, n := range names {
+		if _, err := db.UpsertEntity("decision", n, "desc", nil, nil, "1.0.0", "test"); err != nil {
+			t.Fatalf("upsert entity %s: %v", n, err)
+		}
+		eids[i] = "entity:" + entityRID("decision", n)
+	}
+
+	path := "decisions/churn-doc"
+	if _, err := db.UpsertWikiDoc("title", "body", path, "summary", 0.9, map[string]any{"type": "decision"}, nil); err != nil {
+		t.Fatalf("UpsertWikiDoc: %v", err)
+	}
+	if err := db.WriteWikiMentions(path, eids); err != nil {
+		t.Fatalf("WriteWikiMentions (full set): %v", err)
+	}
+
+	// Both entities resolve to path before churn.
+	if got, err := db.FindWikiDocByEntities(eids); err != nil || got != path {
+		t.Fatalf("pre-churn FindWikiDocByEntities = (%q, %v), want (%q, nil)", got, err, path)
+	}
+
+	// Entity B is "deleted" from the doc — WriteWikiMentions is re-run with only A.
+	if err := db.WriteWikiMentions(path, eids[:1]); err != nil {
+		t.Fatalf("WriteWikiMentions (reduced set): %v", err)
+	}
+
+	// B no longer resolves to the doc.
+	if got, err := db.FindWikiDocByEntities(eids[1:]); err != nil || got != "" {
+		t.Fatalf("post-churn FindWikiDocByEntities(B) = (%q, %v), want (\"\", nil)", got, err)
+	}
+	// A still resolves to the doc.
+	if got, err := db.FindWikiDocByEntities(eids[:1]); err != nil || got != path {
+		t.Fatalf("post-churn FindWikiDocByEntities(A) = (%q, %v), want (%q, nil)", got, err, path)
+	}
+	// The doc's own path field is untouched.
+	doc, err := db.FetchWikiByPath(path)
+	if err != nil || doc == nil {
+		t.Fatalf("FetchWikiByPath: %v", err)
+	}
+	if p, _ := doc["path"].(string); p != path {
+		t.Errorf("doc path = %q, want %q (untouched by edge churn)", p, path)
+	}
+}
+
+// TestIntegrationProcessCluster_AdoptsPreExistingDoc (#320): a legacy doc that
+// already exists at the slug-derived path but has no wiki_mentions edges yet
+// gets adopted on the next resynthesis — WriteWikiMentions backfills identity
+// without a migration, and a subsequent lookup by those entities resolves to
+// the same (adopted) path.
+func TestIntegrationProcessCluster_AdoptsPreExistingDoc(t *testing.T) {
+	db := integrationClient(t, "ci-wiki-mentions-adopt")
+	defer db.Close()
+
+	if _, err := db.UpsertEntity("decision", "adopt-entity-A", "desc", nil, nil, "1.0.0", "test"); err != nil {
+		t.Fatalf("upsert entity: %v", err)
+	}
+	eid := "entity:" + entityRID("decision", "adopt-entity-A")
+
+	// Simulate a pre-existing doc with no edges (the ~119 pinard docs pre-#320).
+	path := "decisions/legacy-adopt-doc"
+	if _, err := db.UpsertWikiDoc("Legacy title", "body", path, "summary", 0.9, map[string]any{"type": "decision"}, nil); err != nil {
+		t.Fatalf("UpsertWikiDoc: %v", err)
+	}
+
+	// Before adoption: no edge yet, so the lookup finds nothing.
+	if got, err := db.FindWikiDocByEntities([]string{eid}); err != nil || got != "" {
+		t.Fatalf("pre-adoption FindWikiDocByEntities = (%q, %v), want (\"\", nil)", got, err)
+	}
+
+	// processCluster's fallback path resolution would land on the same slug path
+	// and then call WriteWikiMentions to adopt it.
+	if err := db.WriteWikiMentions(path, []string{eid}); err != nil {
+		t.Fatalf("WriteWikiMentions (adopt): %v", err)
+	}
+
+	// After adoption: the entity now resolves to the legacy doc's path.
+	got, err := db.FindWikiDocByEntities([]string{eid})
+	if err != nil {
+		t.Fatalf("post-adoption FindWikiDocByEntities: %v", err)
+	}
+	if got != path {
+		t.Errorf("post-adoption FindWikiDocByEntities = %q, want %q", got, path)
+	}
 }

@@ -136,7 +136,14 @@ var statusCmd = &cobra.Command{
 						if tempo == "" {
 							tempo = "unknown"
 						}
-						fmt.Printf("  %-30s %-18s %s\n", key, project, tempo)
+						health := pnats.DeriveAgentHealth(data, time.Now(), agentLivenessThreshold)
+						warn := ""
+						if health.Errored {
+							warn = fmt.Sprintf("  \u26a0 errored: %s", firstLine(health.LastError))
+						} else if health.Stalled {
+							warn = "  \u26a0 stalled"
+						}
+						fmt.Printf("  %-30s %-18s %s%s\n", key, project, tempo, warn)
 					}
 				} else {
 					fmt.Println("  (none)")
@@ -236,6 +243,14 @@ func getDaemonPID(vb *config.Vignoble) string {
 		return strconv.Itoa(pid)
 	}
 	return ""
+}
+
+// firstLine returns the first line of s, for compact single-line status display.
+func firstLine(s string) string {
+	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
+		return s[:idx]
+	}
+	return s
 }
 
 func init() {

@@ -50,10 +50,6 @@ function prRef(data: Record<string, any>): string {
   return data.pressoir === "github" ? `PR #${data.mr}` : `MR !${data.mr}`;
 }
 
-function prWord(data: Record<string, any>): string {
-  return data.pressoir === "github" ? "pull request" : "merge request";
-}
-
 export function formatEventMessage(
   type: string,
   sessionId: string,
@@ -111,6 +107,80 @@ export function formatEventMessage(
   }
 
   return "";
+}
+
+export interface StopReasonClassification {
+  tempo: "errored" | "blocked";
+  lastError?: string;
+}
+
+// classifyTurnStopReason maps pi's AssistantMessage.stopReason to the tempo the
+// worker should publish (#323). "error" and "length" (the max-output-token
+// case) are the only abnormal stops that matter operationally; "stop"/"toolUse"
+// are normal completions and "aborted" is the deliberate interrupt-channel path
+// (see the `.interrupt` subject handler) — neither is an error.
+//
+// `recentAbort` — true when the worker itself requested ctx.abort() (conductor
+// interrupt_worker / webterm CtlInterrupt) within a short grace window before
+// this turn ended. A deliberate abort can surface here as stopReason "error"
+// with an errorMessage rather than pi's own "aborted" stopReason, so when set
+// it suppresses error classification regardless of stopReason — an operator
+// interrupt should never paint an errored/stalled badge.
+export function classifyTurnStopReason(
+  stopReason: string | undefined,
+  errorMessage: string | undefined,
+  recentAbort = false
+): StopReasonClassification {
+  if (recentAbort) return { tempo: "blocked" };
+  if (stopReason === "error") {
+    const trimmed = (errorMessage || "").trim();
+    return { tempo: "errored", lastError: (trimmed || "error: turn failed").slice(0, 300) };
+  }
+  if (stopReason === "length") {
+    return { tempo: "errored", lastError: "length: max output tokens reached" };
+  }
+  return { tempo: "blocked" };
+}
+
+export interface AgentHealth {
+  errored: boolean;
+  lastError?: string;
+  stalled: boolean;
+  compactions: number;
+}
+
+// Mirrors internal/pnats/agent_health.go's DeriveAgentHealth: derives error/stall
+// status from a pinard-agents KV record (#323). `errored` reflects tempo ===
+// "errored", set by the worker on turn_end when pi's stopReason is "error" or
+// the max-output-token "length" case. `stalled` means the agent claims to be
+// actively working (tempo === "active"), its heartbeat is fresh, but its last
+// real state/tempo/step transition (lastTransitionAt) is older than
+// stallThresholdMs — the worker only advances lastTransitionAt on an actual
+// change, so periodic heartbeat republishing doesn't reset it.
+export function deriveAgentHealth(
+  rec: Record<string, any>,
+  now: number,
+  livenessThresholdMs: number,
+  stallThresholdMs = 15 * 60 * 1000
+): AgentHealth {
+  const tempo = rec.tempo;
+  const health: AgentHealth = {
+    errored: tempo === "errored",
+    lastError: typeof rec.lastError === "string" ? rec.lastError : undefined,
+    stalled: false,
+    compactions: typeof rec.compactions === "number" ? rec.compactions : 0,
+  };
+  if (tempo === "active") {
+    const lastSeenMs = Date.parse(rec.lastSeen || "");
+    const fresh = Number.isFinite(lastSeenMs) && now - lastSeenMs <= livenessThresholdMs;
+    if (fresh) {
+      const transMs = Date.parse(rec.lastTransitionAt || "");
+      if (Number.isFinite(transMs) && now - transMs > stallThresholdMs) {
+        health.stalled = true;
+      }
+    }
+  }
+  return health;
 }
 
 export type WorkerStatus = "working" | "idle" | "completed" | "stopped";

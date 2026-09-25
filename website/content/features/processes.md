@@ -60,7 +60,7 @@ The same orchestration that ships code now drives **automation**:
 - **DevOps** — releases, migrations, environment provisioning with approval gates
 - **Recurring operations** — anything that must be reproducible, auditable, and safe to re-run
 
-Built-in starters ship in `processes/` (`swe`, `multi-step`, `review`, `hello`); real pipelines bake their own into the worker repo.
+Built-in starters ship in `processes/` (`swe`, `multi-step`, `hello`); real pipelines bake their own into the worker repo.
 
 ## The vintner's runbook
 

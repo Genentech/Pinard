@@ -11,12 +11,14 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/go-jose/go-jose/v4 v4.0.2
 	github.com/gorilla/websocket v1.5.3
+	github.com/lib/pq v1.12.3
 	github.com/nats-io/nats-server/v2 v2.10.18
 	github.com/nats-io/nats.go v1.41.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2
 	github.com/yuin/goldmark v1.8.4
 	golang.org/x/oauth2 v0.24.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.37.0
 )
@@ -37,7 +39,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
-	github.com/lib/pq v1.12.3 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect

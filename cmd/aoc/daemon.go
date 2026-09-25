@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Genentech/pinard/internal/config"
+	"github.com/Genentech/pinard/internal/logrotate"
 	"github.com/Genentech/pinard/internal/pnats"
 	"github.com/Genentech/pinard/internal/pressoir"
 	"github.com/Genentech/pinard/internal/session"
@@ -27,6 +28,19 @@ var daemonCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		creds, vb, gl, nc := mustLoadAll()
 		defer nc.Close()
+
+		if err := os.MkdirAll(vb.LogDir, 0755); err != nil {
+			log.Printf("[daemon] mkdir %s failed (non-fatal): %v", vb.LogDir, err)
+		}
+		logCfg := logrotate.DefaultConfig()
+		logWriter := logrotate.NewWriter(filepath.Join(vb.LogDir, "aoc-daemon.log"), logCfg)
+		reclaimed, reclaimErr := logrotate.ReclaimIfOversized(logWriter, logCfg)
+		log.SetOutput(logWriter)
+		if reclaimErr != nil {
+			log.Printf("[daemon] reclaim aoc-daemon.log failed (non-fatal): %v", reclaimErr)
+		} else if reclaimed > 0 {
+			log.Printf("[daemon] reclaimed %d bytes: rotated+archived oversized aoc-daemon.log", reclaimed)
+		}
 
 		pCfg := vb.ResolvePressoirConfig("")
 		pr, err := pressoir.NewPressoir(pCfg, creds)
@@ -100,6 +114,8 @@ var daemonCmd = &cobra.Command{
 			User:          creds.GitLab.User,
 			Owner:         creds.WebtermOwner(),
 			CapsulePoller: capsulePoller,
+			Session:       sm,
+			MRState:       mrState,
 		}
 		// Wire the back-pointer so CapsulePoller routes funded spawns through
 		// the owner gate (spawnIfApproved) — externally-funded work still needs
@@ -205,6 +221,13 @@ var daemonCmd = &cobra.Command{
 		go gcWatcher.Run(ctx)
 
 		go runGCBackstopLoop(ctx, kv, vb)
+
+		// Error log: durable, append-only record of abnormal turn ends (#337) —
+		// the pinard-agents KV's lastError/erroredAt are cleared optimistically
+		// by the worker on the next turn_start, so this watcher is the only
+		// surviving trace once that happens.
+		errWatcher := newErrorLogWatcher(kv, vb)
+		go errWatcher.Run(ctx)
 
 		// Run tickers
 		go tick(ctx, "mr-watcher", 30*time.Second, func() { mrWatcher.Run() })

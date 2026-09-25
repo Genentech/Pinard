@@ -176,7 +176,9 @@ func TestBlockedGraceWatcher_OpenMRCancelsAndBlocksScheduling(t *testing.T) {
 	w := newTestWatcher(t, kv)
 	w.MRState.Update(func(s *state.MRWatcherState) {
 		s.Watched = map[string]*state.WatchedMR{
-			"w1": {Name: "w1", MR: 5, State: "review_pending"},
+			// State "" is the realistic "still open" shape (see cmd_gc_test.go's
+			// TestGCBackstopWorkers_SkipsOpenMR comment) — not a placeholder.
+			"w1": {Name: "w1", MR: 5, State: ""},
 		}
 	})
 

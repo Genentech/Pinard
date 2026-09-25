@@ -129,7 +129,11 @@ func TestGCBackstopWorkers_SkipsOpenMR(t *testing.T) {
 	mrState, _ := state.Load[state.MRWatcherState](filepath.Join(vb.StateDir, "mr-watcher.yaml"))
 	mrState.Update(func(s *state.MRWatcherState) {
 		s.Watched = map[string]*state.WatchedMR{
-			"pinard-swe-1": {Name: "pinard-swe-1", MR: 42, State: "review_pending"},
+			// State "" (not e.g. "review_pending") is deliberate: MRWatcher never
+			// writes anything but "post_merge" on completion (see mrs.go), so this
+			// is the shape every real open MR has. A placeholder non-empty state
+			// here would mask the state.OpenMR inert-predicate bug from MR !626.
+			"pinard-swe-1": {Name: "pinard-swe-1", MR: 42, State: ""},
 		}
 	})
 

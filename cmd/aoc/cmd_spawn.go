@@ -149,11 +149,10 @@ var spawnCmd = &cobra.Command{
 				targetBranch = vigne.DefaultBranch
 			} else {
 				detected, err := git.DefaultBranch(projectPath)
-				if err == nil && detected != "" {
-					targetBranch = detected
-				} else {
-					targetBranch = "master"
+				if err != nil {
+					return fmt.Errorf("resolve default branch for %s: %w", project, err)
 				}
+				targetBranch = detected
 			}
 		}
 
@@ -323,7 +322,10 @@ Instructions:
 			if err := git.WorktreeAdd(projectPath, spawnDir, branchName, startPoint); err != nil {
 				// Try fallback start points
 				if err2 := git.WorktreeAdd(projectPath, spawnDir, branchName, targetBranch); err2 != nil {
-					defaultBranch, _ := git.DefaultBranch(projectPath)
+					defaultBranch, dbErr := git.DefaultBranch(projectPath)
+					if dbErr != nil {
+						return fmt.Errorf("failed to create worktree (target %q): %v; default-branch fallback unavailable: %w", targetBranch, err2, dbErr)
+					}
 					if err3 := git.WorktreeAdd(projectPath, spawnDir, branchName, "origin/"+defaultBranch); err3 != nil {
 						// Self-heal: a leftover worktree dir or branch from an
 						// abandoned run blocks reuse of this name. Prune it and

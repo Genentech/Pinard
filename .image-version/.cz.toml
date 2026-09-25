@@ -6,6 +6,6 @@
 name = "cz_conventional_commits"
 tag_format = "image-$version"
 version_scheme = "semver"
-version = "0.79.1"
+version = "0.82.1"
 update_changelog_on_bump = false
 bump_message = "bump image $current_version → $new_version"

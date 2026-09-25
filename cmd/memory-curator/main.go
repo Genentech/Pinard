@@ -509,8 +509,36 @@ func processCluster(cl []map[string]any, db *surreal.Client, repoPath, groupID s
 		return "", false, nil
 	}
 
-	// Slug + path from the synthesized title.
-	okfPath = rolePath(role, slugify(synthTitle, 80))
+	// Resolve the doc's identity. Entities already linked to a wiki_doc (via
+	// wiki_mentions) keep that doc's path stable across resynthesis — the title
+	// becomes purely display-only and can be reworded freely without minting a
+	// new page (#320). Falls back to slugging the synthesized title when none of
+	// the cluster's entities are linked yet — a genuinely new concept, OR a
+	// pre-existing doc with no edges. Bootstrap for the latter is best-effort:
+	// it adopts immediately if the re-slug happens to be unchanged, or if the
+	// FindSimilarWikiDoc cosine check below happens to match; otherwise this
+	// resynthesis mints one last extra page for that concept before
+	// WriteWikiMentions records its edges and locks its identity for every
+	// resynthesis after. Cleaning up that one-time pre-existing duplicate (e.g.
+	// the `conductor-led …` triplicate cosine doesn't catch) is the
+	// consolidation tier's job (#321), not this one's.
+	entityIDs := make([]string, 0, len(cl))
+	for _, e := range cl {
+		if eid := entityRecordID(e); eid != "" {
+			entityIDs = append(entityIDs, eid)
+		}
+	}
+	var edgePath string
+	if p, ferr := db.FindWikiDocByEntities(entityIDs); ferr != nil {
+		log.Printf("WARN: find wiki doc by entities %s: %v", groupID, ferr)
+	} else {
+		edgePath = p
+	}
+	if edgePath != "" {
+		okfPath = edgePath
+	} else {
+		okfPath = rolePath(role, slugify(synthTitle, 80))
+	}
 	mdFile = filepath.Join(repoPath, okfPath+".md")
 	if fm := readFrontmatter(mdFile); fm["source"] == "human" {
 		return "", false, nil
@@ -527,7 +555,10 @@ func processCluster(cl []map[string]any, db *surreal.Client, repoPath, groupID s
 
 	// Dedup AFTER synthesis: if a sufficiently-similar page already exists, write
 	// to ITS path instead of creating a near-duplicate. Done here (not pre-
-	// synthesis) so the final title's re-slug can't discard the match.
+	// synthesis) so the final title's re-slug can't discard the match. Only
+	// consulted when the edge-based lookup above didn't already resolve a path —
+	// stable identity is authoritative and takes precedence over this softer
+	// embedding-similarity signal.
 	//
 	// Embedding-cosine (FindSimilarWikiDoc), role-scoped (#265), is the only
 	// dedup signal: it is semantic (whole-body similarity) so a high score is
@@ -535,14 +566,14 @@ func processCluster(cl []map[string]any, db *surreal.Client, repoPath, groupID s
 	// match signal was tried and reverted (#265 review, owner decision): a
 	// heuristic matcher compensating for an unstable identity key still makes
 	// irreversible merges, which is the wrong tool for this problem — a future
-	// consolidation tier (vigne/vignoble/global, supersede-not-delete) plus a
-	// stable concept identity will handle near-duplicates properly instead.
+	// consolidation tier (vigne/vignoble/global, supersede-not-delete) handles
+	// near-duplicates that predate stable identity.
 	dedupPath := ""
 	dedupReason := ""
-	if vec != nil {
-		if existingPath, score, err := db.FindSimilarWikiDoc(role, vec); err == nil &&
-			existingPath != "" && existingPath != okfPath && score >= dedupThresholdFor(role) {
-			dedupPath = existingPath
+	if edgePath == "" && vec != nil {
+		if simPath, score, err := db.FindSimilarWikiDoc(role, vec); err == nil &&
+			simPath != "" && simPath != okfPath && score >= dedupThresholdFor(role) {
+			dedupPath = simPath
 			dedupReason = fmt.Sprintf("embedding score=%.3f", score)
 		}
 	}
@@ -557,20 +588,32 @@ func processCluster(cl []map[string]any, db *surreal.Client, repoPath, groupID s
 
 	// Persist to SurrealDB.
 	fm := map[string]any{
-		"type":      role,
-		"title":     synthTitle,
-		"summary":   synthSummary,
-		"group_id":  groupID,
+		"type":       role,
+		"title":      synthTitle,
+		"summary":    synthSummary,
+		"group_id":   groupID,
 		"confidence": confidence,
-		"status":    status,
-		"source":    "curator",
-		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"status":     status,
+		"source":     "curator",
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
 	}
 	if len(relations) > 0 {
 		fm["relations"] = relations
 	}
 	if _, err := db.UpsertWikiDoc(synthTitle, body, okfPath, synthSummary, confidence, fm, vec); err != nil {
 		log.Printf("WARN: upsert wiki_doc %s: %v", okfPath, err)
+	}
+
+	// Record which entities this doc was synthesized from, so the next
+	// resynthesis of this concept resolves back to this same path (#320)
+	// regardless of whether the path came from an edge match, an embedding
+	// dedup match, or a fresh slug. For a fresh slug on a pre-existing doc with
+	// no prior edges, this is what locks its identity going forward — see the
+	// bootstrap caveat above (identity resolution).
+	if len(entityIDs) > 0 {
+		if err := db.WriteWikiMentions(okfPath, entityIDs); err != nil {
+			log.Printf("WARN: write wiki_mentions %s: %v", okfPath, err)
+		}
 	}
 
 	// Write to disk.

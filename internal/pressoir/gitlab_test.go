@@ -422,3 +422,61 @@ func TestGitLab_AddSubIssue_CallsIssueLink(t *testing.T) {
 		t.Error("expected issue-link POST to be called, but it was not")
 	}
 }
+
+// TestGitLab_AddLabel_HitsMergeRequestEndpoint verifies that AddLabel PUTs
+// add_labels to the merge_requests endpoint (not issues, which SetLabels
+// mistakenly targets for MRs) and never replaces the existing label set.
+func TestGitLab_AddLabel_HitsMergeRequestEndpoint(t *testing.T) {
+	var gotPath, gotMethod, gotBody string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/projects/group%2Frepo/merge_requests/42", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		gotMethod = r.Method
+		_ = r.ParseForm()
+		gotBody = r.Form.Get("add_labels")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	mux.HandleFunc("/api/v4/projects/group%2Frepo/issues/42", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("AddLabel must not hit the issues endpoint for a MR, got %s %s", r.Method, r.URL.Path)
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	adapter := newTestAdapter(srv)
+	if err := adapter.AddLabel(context.Background(), RepoRef{Owner: "group", Name: "repo"}, 42, "pinard:reviewed"); err != nil {
+		t.Fatalf("AddLabel: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Errorf("method: got %q, want PUT", gotMethod)
+	}
+	if gotPath != "/api/v4/projects/group%2Frepo/merge_requests/42" {
+		t.Errorf("path: got %q", gotPath)
+	}
+	if gotBody != "pinard:reviewed" {
+		t.Errorf("add_labels param: got %q, want %q", gotBody, "pinard:reviewed")
+	}
+}
+
+// TestGitLab_RemoveLabel_HitsMergeRequestEndpoint mirrors AddLabel for the
+// remove_labels param.
+func TestGitLab_RemoveLabel_HitsMergeRequestEndpoint(t *testing.T) {
+	var gotBody string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/projects/group%2Frepo/merge_requests/42", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotBody = r.Form.Get("remove_labels")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+
+	adapter := newTestAdapter(srv)
+	if err := adapter.RemoveLabel(context.Background(), RepoRef{Owner: "group", Name: "repo"}, 42, "pinard:reviewed"); err != nil {
+		t.Fatalf("RemoveLabel: %v", err)
+	}
+	if gotBody != "pinard:reviewed" {
+		t.Errorf("remove_labels param: got %q, want %q", gotBody, "pinard:reviewed")
+	}
+}

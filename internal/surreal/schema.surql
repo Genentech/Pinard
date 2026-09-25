@@ -74,6 +74,12 @@ DEFINE TABLE IF NOT EXISTS wiki_doc SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS title        ON wiki_doc TYPE string;
 DEFINE FIELD IF NOT EXISTS type         ON wiki_doc TYPE string  DEFAULT "";
 DEFINE FIELD IF NOT EXISTS body         ON wiki_doc TYPE string  DEFAULT "";
+-- summary is written by UpsertWikiDoc and SELECTed by recall, but was never
+-- DEFINEd. Live DBs tolerated it only because their wiki_doc table predates the
+-- SCHEMAFULL definition (DEFINE TABLE IF NOT EXISTS never converts an existing
+-- table) — any freshly created scope DB is genuinely SCHEMAFULL and rejects the
+-- write with "Found field 'summary', but no such field exists".
+DEFINE FIELD IF NOT EXISTS summary      ON wiki_doc TYPE string  DEFAULT "";
 DEFINE FIELD IF NOT EXISTS frontmatter  ON wiki_doc TYPE object FLEXIBLE DEFAULT {};
 DEFINE FIELD IF NOT EXISTS path         ON wiki_doc TYPE string  DEFAULT "";
 DEFINE FIELD IF NOT EXISTS content_hash ON wiki_doc TYPE string  DEFAULT "";
@@ -223,6 +229,10 @@ DEFINE FIELD IF NOT EXISTS edge_type  ON wiki_references TYPE string DEFAULT "";
 DEFINE FIELD IF NOT EXISTS created_at ON wiki_references TYPE datetime DEFAULT time::now();
 
 -- ─── Wiki ↔ entity cross-references ──────────────────────────────────────────
+-- Written/read from Go by WriteWikiMentions / FindWikiDocByEntities (#320): a
+-- doc's source entities give it a stable identity independent of its
+-- (re-synthesizable) title, so re-titling a concept updates the existing page
+-- instead of minting a new one.
 DEFINE TABLE IF NOT EXISTS wiki_mentions SCHEMAFULL TYPE RELATION IN wiki_doc OUT entity;
 DEFINE FIELD IF NOT EXISTS edge_type  ON wiki_mentions TYPE string DEFAULT "";
 DEFINE FIELD IF NOT EXISTS created_at ON wiki_mentions TYPE datetime DEFAULT time::now();

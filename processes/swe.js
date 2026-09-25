@@ -1,4 +1,14 @@
-import { defineTask } from '@a5c-ai/babysitter-sdk';
+import { defineTask, nodeTask } from '@a5c-ai/babysitter-sdk';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// swe.js is shared: a worker's process.cwd() is its own project worktree, not
+// necessarily the repo this file lives in (bin/pinard resolves the process
+// file through a fallback chain, e.g. $PINARD_REPO or a per-project override
+// under vignes/<project>/processes/). node-task entries below must resolve
+// against *this file's* location, not the worker's cwd, or every non-pinard
+// project spawn would ENOENT on a relative 'processes/scripts/...' path.
+const processDir = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Task definitions ─────────────────────────────────────────
 
@@ -162,16 +172,16 @@ Instructions for opening the MR:
    ${args.issueId ? `Closes #${args.issueId}\n\n` : ''}---
    🍇 Pinard worker: ${args.session}
    Process: swe | Parcelle: ${args.parcelle || 'default'} | Run ID: ${args.runId || 'unknown'}
-4. Open MR via API (glab mr create does not work with ssh remotes):
-   glab api projects/${args.encodedRepo}/merge_requests -X POST --hostname ${args.host} \\
-     -f source_branch=$(git branch --show-current) \\
-     -f target_branch=${args.targetBranch || 'main'} \\
-     -f title="<title>" \\
-     -F description=@.git/mr-description.md \\
-     -f assignee_id=$(glab api users -X GET --hostname ${args.host} -f username=${args.assignee} 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['id'])" 2>/dev/null) \\
-     -f reviewer_ids=$(glab api users -X GET --hostname ${args.host} -f username=${args.reviewer} 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)[0]['id'])" 2>/dev/null)
-5. Parse the MR IID from the response
-6. Run: aoc notify "[${args.session}] Opened MR !<iid> on ${args.project}"`,
+4. Title convention (enforced by aoc pressoir open-pr — a non-conforming title is rejected
+   before the MR is created): the title MUST start with "fix:", "feat:", "fix(scope):", or
+   "feat(scope):" — scope is optional, the prefix is not. Forbidden: "docs:", "chore:",
+   "refactor:", "ops:", "observability:", or no prefix at all. Use fix: for bug fixes/
+   corrections and feat: for new capabilities, even for docs/ops/observability changes
+   (e.g. "fix(docs): …", "feat(ci): …").
+5. Open MR via aoc pressoir (provider-neutral — works on both GitLab and GitHub):
+   aoc pressoir open-pr --repo ${args.repo} --src $(git branch --show-current) --dst ${args.targetBranch || 'main'} --title "<title>" --body "$(cat .git/mr-description.md)"
+6. Parse the MR number and URL from the JSON response (GitLab: "Number"/"WebURL"; GitHub: same fields)
+7. Run: aoc notify "[${args.session}] Opened MR !<iid> on ${args.project}"`,
     },
     outputSchema: {
       type: 'object',
@@ -226,7 +236,6 @@ ${args.message || JSON.stringify(args.comments)}`,
         'Reply to each comment explaining what you did',
         'Push the updated code',
         'Confirm the push actually landed on the remote before signaling completion — run `git fetch origin && test "$(git rev-parse HEAD)" = "$(git rev-parse origin/$(git branch --show-current))"`; if it does not match, push again and re-check',
-        `Only once the push is confirmed, run: aoc notify "[${args.session}] Addressed review feedback"`,
       ],
     },
     outputSchema: {
@@ -256,7 +265,6 @@ Message: ${args.message || ''}`,
         'Determine if this is a legitimate error, a transient timing issue, or a GitLab infra issue',
         'If transient/infra: re-run the failed job via the API',
         'If legitimate: fix the code and push',
-        `Run: aoc notify "[${args.session}] ${args.isMain ? 'Fixed main pipeline' : 'Fixed pipeline'}"`,
       ],
     },
     outputSchema: {
@@ -270,6 +278,20 @@ Message: ${args.message || ''}`,
     },
   },
 }));
+
+// Deterministic, LLM-free notify gate (issue #342): a plain kind:'node' task,
+// auto-executed by the babysitter runtime — the agent tasks above never decide
+// whether to notify, so a turn that pushed nothing can't announce that it did.
+const getHeadSha = nodeTask('get-head-sha', {
+  title: 'Resolve current HEAD sha',
+  entry: path.join(processDir, 'scripts/get-head-sha.js'),
+});
+
+const notifyIfChanged = nodeTask('notify-if-changed', {
+  title: (args) => `Notify if changed: ${args.message}`,
+  entry: path.join(processDir, 'scripts/notify-if-changed.js'),
+  args: (args) => ['--message', args.message, '--last-sha', args.lastSha || ''],
+});
 
 const claimIssue = defineTask('claim-issue', (args) => ({
   kind: 'agent',
@@ -326,13 +348,9 @@ const discardIssue = defineTask('discard-issue', (args) => ({
     name: 'issue-discarder',
     prompt: {
       role: 'A developer marking an issue as discarded by pinard',
-      task: `Mark issue #${args.issueId} as discarded. Run these API calls:
+      task: `Mark issue #${args.issueId} as discarded: unassign pinard and swap the "in-progress" label for "pinard:discarded".
 
-1. Unassign pinard:
-   glab api projects/${args.encodedRepo}/issues/${args.issueId} -X PUT --hostname ${args.host} -f assignee_ids=[]
-
-2. Remove "in-progress" and add "pinard:discarded" label:
-   glab api projects/${args.encodedRepo}/issues/${args.issueId} -X PUT --hostname ${args.host} -f remove_labels=in-progress -f add_labels=pinard:discarded`,
+aoc pressoir update-issue --repo ${args.repo} --number ${args.issueId} --unassign --remove-labels in-progress --add-labels pinard:discarded`,
     },
     outputSchema: {
       type: 'object',
@@ -535,16 +553,18 @@ export async function process(inputs = {}, ctx) {
     summary: impl.summary,
     targetBranch,
     issueId: inputs.issueId,
-    encodedRepo,
-    host,
-    assignee,
-    reviewer,
+    repo: inputs.repo || '',
     session,
     project,
     parcelle: inputs.parcelle || '',
     runId: inputs.runId || '',
   });
   await ctx.task(trackMR, { mrIid: mr.mrIid, project });
+
+  // Baseline for the deterministic notify gate (issue #342): every subsequent
+  // "addressed review" / "fixed pipeline" notify only fires when HEAD has
+  // moved past this sha.
+  let lastNotifiedSha = (await ctx.task(getHeadSha, {})).sha;
 
   if (inputs.issueId) {
     await ctx.task(commentOnIssue, {
@@ -569,6 +589,11 @@ export async function process(inputs = {}, ctx) {
         session,
         isMain: false,
       });
+      lastNotifiedSha = (await ctx.task(notifyIfChanged, {
+        session,
+        message: `[${session}] Fixed pipeline`,
+        lastSha: lastNotifiedSha,
+      })).sha;
     } else if (event.type === 'pipeline_cancelled') {
       await ctx.breakpoint({
         question: `Pipeline was cancelled (${event.url || 'unknown'}). What should I do? Re-run, fix something, or wait?`,
@@ -579,6 +604,11 @@ export async function process(inputs = {}, ctx) {
         message: event.message,
         session,
       });
+      lastNotifiedSha = (await ctx.task(notifyIfChanged, {
+        session,
+        message: `[${session}] Addressed review feedback`,
+        lastSha: lastNotifiedSha,
+      })).sha;
     } else if (event.type === 'mr_merged' || event.type === 'auto_merged') {
       merged = true;
     } else if (event.type === 'mr_closed') {
@@ -595,9 +625,7 @@ export async function process(inputs = {}, ctx) {
       });
       await ctx.task(discardIssue, {
         issueId: inputs.issueId,
-        encodedRepo,
-        host,
-        assignee,
+        repo: inputs.repo || '',
       });
     }
     return { mrIid: mr.mrIid, status: 'closed' };
@@ -620,15 +648,17 @@ export async function process(inputs = {}, ctx) {
         session,
         isMain: true,
       });
+      lastNotifiedSha = (await ctx.task(notifyIfChanged, {
+        session,
+        message: `[${session}] Fixed main pipeline`,
+        lastSha: lastNotifiedSha,
+      })).sha;
 
       // Open fix MR (same branch, new commit)
       const fixMR = await ctx.task(openMR, {
         summary: 'Fix main pipeline failure',
         targetBranch,
-        encodedRepo,
-        host,
-        assignee,
-        reviewer,
+        repo: inputs.repo || '',
         session,
         project,
         parcelle: inputs.parcelle || '',
@@ -644,8 +674,18 @@ export async function process(inputs = {}, ctx) {
         });
         if (fixEvent.type === 'pipeline_failed') {
           await ctx.task(fixPipeline, { pipelineUrl: fixEvent.url, session, isMain: false });
+          lastNotifiedSha = (await ctx.task(notifyIfChanged, {
+            session,
+            message: `[${session}] Fixed pipeline`,
+            lastSha: lastNotifiedSha,
+          })).sha;
         } else if (fixEvent.type === 'review_comment') {
           await ctx.task(addressReview, { comments: fixEvent.notes, message: fixEvent.message, session });
+          lastNotifiedSha = (await ctx.task(notifyIfChanged, {
+            session,
+            message: `[${session}] Addressed review feedback`,
+            lastSha: lastNotifiedSha,
+          })).sha;
         } else if (fixEvent.type === 'mr_merged' || fixEvent.type === 'auto_merged') {
           fixMerged = true;
         }

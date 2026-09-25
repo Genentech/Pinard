@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +26,13 @@ import (
 // The HTML comment renders invisibly in GitLab and is stripped before the note
 // reaches the worker.
 const ConductorMarker = "<!-- pinard:conductor -->"
+
+// ReviewedLabel marks a MR/PR as reviewed-with-nothing-to-say by the owning
+// maître: a record-without-notify ALL-CLEAR ack. Applied by `aoc
+// mark-mr-reviewed` (cmd/aoc/cmd_mark_reviewed.go), read here to gate
+// needs_review re-dispatch, and cleared once the head SHA it was applied
+// against changes (labels, unlike GitLab approvals, do not auto-reset on push).
+const ReviewedLabel = "pinard:reviewed"
 
 // memoryMarkerPrefix is the @memory: review-note marker (§10). A reviewer can
 // prefix a note with this string to route its text directly into the /lesson
@@ -1116,6 +1124,29 @@ func (w *MRWatcher) tryAutoReview(sessionName string, entry *state.WatchedMR) {
 		return
 	}
 
+	// Forge-durable ack gate: a `pinard:reviewed` label is the maître's
+	// record-without-notify ALL-CLEAR signal (see ReviewedLabel doc). It is
+	// authoritative over local state — unlike entry.ReviewedSHA, it survives a
+	// lost/rebuilt watcher entry — so treat its presence at the current head
+	// SHA as review-complete without ever publishing needs_review.
+	if slices.Contains(pr.Labels, ReviewedLabel) {
+		if entry.ReviewedSHA == "" || entry.ReviewedSHA == headSHA {
+			w.State.Update(func(s *state.MRWatcherState) {
+				e := s.Watched[sessionName]
+				e.ReviewedSHA = headSHA
+				e.ReviewNotified = true
+			})
+			return
+		}
+		// Stale ack: the label was applied against an older commit. Labels
+		// don't auto-reset on push (unlike GitLab approvals), so clear it
+		// ourselves before falling through to a fresh dispatch — otherwise the
+		// forge would keep showing "reviewed" for changed code.
+		if err := w.pressoirFor(entry.Repo).RemoveLabel(ctx, repoRef, entry.MR, ReviewedLabel); err != nil {
+			log.Printf("[auto-review] Failed to clear stale %q label on MR !%d (%s): %v", ReviewedLabel, entry.MR, projectName, err)
+		}
+	}
+
 	// SHA gate: already reviewed at this commit.
 	if entry.ReviewedSHA == headSHA {
 		return
@@ -1134,7 +1165,7 @@ func (w *MRWatcher) tryAutoReview(sessionName string, entry *state.WatchedMR) {
 	subject := pnats.NotificationsSubject(w.Vignoble.Name, parcelle)
 	payload := map[string]any{
 		"type":      "needs_review",
-		"message":   fmt.Sprintf("MR !%d on %s is green — review needed", entry.MR, projectName),
+		"message":   fmt.Sprintf("MR !%d on %s — CI passed, review needed", entry.MR, projectName),
 		"mr":        entry.MR,
 		"project":   projectName,
 		"repo":      entry.Repo,

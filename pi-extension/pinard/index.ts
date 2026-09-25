@@ -12,6 +12,8 @@ import { Kvm, type KV } from "@nats-io/kv";
 import { registerProxyProvider, seedProxyAuth } from "../shared/provider.js";
 import { updateIssueTool } from "../shared/tools.js";
 import { parseTeachingArgs, buildEpisodePayload, type TurnRecord } from "../../lib/teaching.js";
+import { deriveAgentHealth } from "../../lib/logic.js";
+import { appendRotating } from "../../lib/logRotate.js";
 
 const ACK_REQUIRED_TYPES = new Set([
   "schedule_spawned", "schedule_skipped", "schedule_failed",
@@ -188,7 +190,7 @@ const T_LAUNCH = Number(process.env.PINARD_LAUNCH_MS) || 0;
 function slog(msg: string): void {
   try {
     const rel = T_LAUNCH ? ` +${Date.now() - T_LAUNCH}ms` : "";
-    require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [startup] ${msg}${rel}\n`);
+    appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [startup] ${msg}${rel}\n`);
   } catch {}
 }
 slog("extension module evaluated (= pi boot + extension load)");
@@ -584,7 +586,7 @@ function recordPendingEvent(eventType: string, sessionId: string, data: Record<s
 }
 
 async function handleAgentEvent(type: string, sessionId: string, data: Record<string, any>): Promise<void> {
-  try { require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [ENTER] type=${type} session=${sessionId}\n`); } catch (e: any) { console.error("[conductor.log]", e.message); }
+  try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [ENTER] type=${type} session=${sessionId}\n`); } catch (e: any) { console.error("[conductor.log]", e.message); }
   // Resolve pending btw reply if this is a btw_reply event
   if (type === "btw_reply" && data.btw_id) {
     const pending = pendingBtwReplies.get(data.btw_id);
@@ -606,13 +608,13 @@ async function handleAgentEvent(type: string, sessionId: string, data: Record<st
   if (agentEvents.length > MAX_EVENTS) agentEvents.shift();
 
   // Log
-  const { appendFileSync, mkdirSync } = require("node:fs");
+  const { mkdirSync } = require("node:fs");
   const logDir = join(VIGNOBLE, "logs");
   const line = `${event.timestamp} [nats] ${type} ${sessionId} ${event.cwd}\n`;
   try {
     mkdirSync(logDir, { recursive: true });
-    appendFileSync(join(logDir, "nats-events.log"), line);
-    appendFileSync(join(logDir, "system.log"), line);
+    appendRotating(join(logDir, "nats-events.log"), line);
+    appendRotating(join(logDir, "system.log"), line);
   } catch {}
 
   // Deduplicate
@@ -620,12 +622,12 @@ async function handleAgentEvent(type: string, sessionId: string, data: Record<st
   try {
     dedupeKey = buildDedupeKey(sessionId, type, data);
   } catch (e: any) {
-    try { require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [ERROR] buildDedupeKey crashed: ${e.message}\n`); } catch {}
+    try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [ERROR] buildDedupeKey crashed: ${e.message}\n`); } catch {}
     return;
   }
-  try { require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [DEDUP-CHECK] key=${dedupeKey} has=${deliveredEvents.has(dedupeKey)}\n`); } catch {}
+  try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [DEDUP-CHECK] key=${dedupeKey} has=${deliveredEvents.has(dedupeKey)}\n`); } catch {}
   if (deliveredEvents.has(dedupeKey)) {
-    try { require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [dedup] SKIPPED ${type} ${sessionId} key=${dedupeKey}\n`); } catch {}
+    try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [dedup] SKIPPED ${type} ${sessionId} key=${dedupeKey}\n`); } catch {}
     return;
   }
   deliveredEvents.add(dedupeKey);
@@ -654,7 +656,7 @@ async function handleAgentEvent(type: string, sessionId: string, data: Record<st
   const { classifyEvent } = require("../../lib/classify");
   const category = classifyEvent(type, isProcessGoverned, data);
 
-  try { appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [classify] ${type} ${sessionId} → ${category} (process=${isProcessGoverned})\n`); } catch {}
+  try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [classify] ${type} ${sessionId} → ${category} (process=${isProcessGoverned})\n`); } catch {}
 
   // Informational: update dashboard, don't touch LLM
   if (category === "informational") {
@@ -665,7 +667,7 @@ async function handleAgentEvent(type: string, sessionId: string, data: Record<st
   // Human-attention and judgment: deliver to LLM
   const message = formatEventMessage(type, sessionId, data);
   if (message && piRef && !data._batched) {
-    try { appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [deliver] ${type} ${sessionId} category=${category} msg=${message.slice(0, 80)}\n`); } catch {}
+    try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [deliver] ${type} ${sessionId} category=${category} msg=${message.slice(0, 80)}\n`); } catch {}
     piRef.sendUserMessage(message, { deliverAs: "followUp" });
   }
 
@@ -733,7 +735,7 @@ async function connectNats(retries = 2): Promise<void> {
       ? `pinard-maitre-${VIGNOBLE_NAME}-${PARCELLE}`
       : `pinard-conductor-${VIGNOBLE_NAME}`;
     const jsm = await js.jetstreamManager();
-    const clog = (msg: string) => { try { require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} ${msg}\n`); } catch {} };
+    const clog = (msg: string) => { try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} ${msg}\n`); } catch {} };
     // Only maîtres consume the per-parcelle agent-events firehose. The
     // dashboard / general lane relies on the KV overview + notifications / issues
     // / schedules consumers; it does NOT ingest agent events (design D3 / task 6.1).
@@ -1106,6 +1108,10 @@ interface WorkerInfo {
   process?: string;
   parcelle?: string;
   remote?: boolean;
+  errored?: boolean;
+  lastError?: string;
+  stalled?: boolean;
+  compactions?: number;
 }
 
 // Remote/standalone workers (HPC/SIF, PINARD_STANDALONE=1) run on another host,
@@ -1166,6 +1172,7 @@ async function refreshWorkersFromKV(): Promise<void> {
             staleKeys.push(key);
             continue;
           }
+          const health = deriveAgentHealth(state, Date.now(), REMOTE_AGENT_TTL_MS);
           workers.push({
             name: sessionName,
             sessionId: state.session_id || key,
@@ -1176,6 +1183,10 @@ async function refreshWorkersFromKV(): Promise<void> {
             process: state.process || undefined,
             parcelle: state.parcelle || undefined,
             remote: true,
+            errored: health.errored,
+            lastError: health.lastError,
+            stalled: health.stalled,
+            compactions: health.compactions,
           });
           continue;
         }
@@ -1187,6 +1198,7 @@ async function refreshWorkersFromKV(): Promise<void> {
           continue;
         }
 
+        const health = deriveAgentHealth(state, Date.now(), REMOTE_AGENT_TTL_MS);
         workers.push({
           name: sessionName,
           sessionId: state.session_id || key,
@@ -1196,6 +1208,10 @@ async function refreshWorkersFromKV(): Promise<void> {
           status: getWorkerStatus(state),
           process: state.process || undefined,
           parcelle: state.parcelle || undefined,
+          errored: health.errored,
+          lastError: health.lastError,
+          stalled: health.stalled,
+          compactions: health.compactions,
         });
       }
     } catch {}
@@ -1662,8 +1678,7 @@ const spawnAgentTool = defineTool({
       if (params.issue) args.push("--issue", params.issue);
       args.push("--prompt", `Resuming run ${params.run_id}`);
       try {
-        const { appendFileSync } = require("node:fs");
-        try { appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [spawn] ${AOC} ${args.join(" ")}\n`); } catch {}
+        try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [spawn] ${AOC} ${args.join(" ")}\n`); } catch {}
         const result = execFileSync(AOC, args, { encoding: "utf8" });
         return { content: [{ type: "text" as const, text: result.trim() }], details: undefined };
       } catch (e: any) {
@@ -1673,6 +1688,35 @@ const spawnAgentTool = defineTool({
 
     // Issue-driven: assign to pinard and let daemon spawn
     if (params.issue) {
+      // An already-spawned issue must never be silently re-assigned (the daemon
+      // no-ops on a status=spawned issue absent the pinard:discarded ritual) —
+      // respawn it immediately instead, or fail loudly naming the remedy.
+      try {
+        const statusJson = execFileSync(AOC, [
+          "issue-status", "--project", project, "--issue", String(params.issue),
+        ], { encoding: "utf8", timeout: 10_000 });
+        const { status } = JSON.parse(statusJson) as { status: string };
+        if (status === "spawned") {
+          // Never pass --force here: an open-MR refusal must surface to the
+          // caller rather than be silently bypassed — respawn_issue(force:
+          // true) is the explicit, deliberate way to abandon an open MR.
+          const args = ["respawn", project, String(params.issue)];
+          try {
+            const result = execFileSync(AOC, args, { encoding: "utf8" });
+            return { content: [{ type: "text" as const, text: result.trim() }], details: undefined };
+          } catch (e: any) {
+            const reason = e.stderr || e.message;
+            const hint = /open MR/.test(reason) ? " Use respawn_issue with force:true to explicitly abandon that MR and respawn anyway." : "";
+            return { content: [{ type: "text" as const, text: `Issue #${params.issue} is already spawned and respawn failed: ${reason}${hint}` }], details: undefined };
+          }
+        }
+        if (status === "awaiting-approval") {
+          return { content: [{ type: "text" as const, text: `Issue #${params.issue} is held awaiting owner approval — the owner must comment approval before it can spawn (or use respawn_issue once approved).` }], details: undefined };
+        }
+      } catch {
+        // issue-status failed (e.g. never tracked) — fall through to the normal assign flow.
+      }
+
       try {
         const repo = resolveProjectRepo(project);
         const pinardUser = process.env.PINARD_GITLAB_USER || "pinard";
@@ -1691,7 +1735,6 @@ const spawnAgentTool = defineTool({
         // Prefer the owner token (PINARD_OWNER_GITLAB_TOKEN) so the assignment note
         // is authored by the human operator → satisfies the owner-gate without a
         // manual approval comment. Fall back to bot-authenticated pressoir if unavailable.
-        const { appendFileSync: appendLog } = require("node:fs");
         const ownerToken = process.env.PINARD_OWNER_GITLAB_TOKEN || "";
         const host = gitlabHost();
         const encodedRepo = encodeURIComponent(repo);
@@ -1712,7 +1755,7 @@ const spawnAgentTool = defineTool({
           if (labels) updateArgs.push("--add-labels", labels);
           execFileSync(AOC, updateArgs, { encoding: "utf8", timeout: 10_000 });
         }
-        try { appendLog(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [spawn] assign issue #${params.issue} to ${pinardUser} on ${project}${params.parcelle ? ` parcelle=${params.parcelle}` : ""} (${assignedViaOwner ? "owner token" : "bot token"})\n`); } catch {}
+        try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [spawn] assign issue #${params.issue} to ${pinardUser} on ${project}${params.parcelle ? ` parcelle=${params.parcelle}` : ""} (${assignedViaOwner ? "owner token" : "bot token"})\n`); } catch {}
 
         const botWarn = !assignedViaOwner
           ? ` ⚠️  Assigned via **bot** token — this issue will require \`@${pinardUser} approve\` before it runs (set \`PINARD_OWNER_GITLAB_TOKEN\` to skip the manual approval step).`
@@ -1736,12 +1779,35 @@ const spawnAgentTool = defineTool({
     if (params.parcelle) args.push("--parcelle", params.parcelle);
     if (params.target_branch) args.push("--target-branch", params.target_branch);
     try {
-      const { appendFileSync: appendLog2 } = require("node:fs");
-      try { appendLog2(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [spawn] ${AOC} ${args.join(" ")}\n`); } catch {}
+      try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [spawn] ${AOC} ${args.join(" ")}\n`); } catch {}
       const result = execFileSync(AOC, args, { encoding: "utf8" });
       return { content: [{ type: "text" as const, text: result.trim() }], details: undefined };
     } catch (e: any) {
       return { content: [{ type: "text" as const, text: `Spawn failed: ${e.stderr || e.message}` }], details: undefined };
+    }
+  },
+});
+
+const respawnIssueTool = defineTool({
+  name: "respawn_issue",
+  label: "Respawn Issue",
+  description: "Immediately respawn a vendangeur on an issue that's already tracked as spawned — replaces the two-step pinard:discarded label ritual with one atomic call. Reaps any stale worker/worktree, clears stale labels, resets watcher state, and spawns right away (still subject to the owner-approval gate). Refuses if the previous worker has an open, unmerged MR unless force is set — pass force only when you intend to abandon that MR (its remote branch survives, orphaned; a fresh MR will be opened for the same issue).",
+  parameters: Type.Object({
+    project: Type.String({ description: "Vigne/project name from vignes.yaml" }),
+    issue: Type.String({ description: "GitLab issue IID to respawn" }),
+    force: Type.Optional(Type.Boolean({ description: "Respawn even if the previous worker has an open, unmerged MR (abandons it). Default false." })),
+  }),
+  async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    const { execFileSync } = require("node:child_process");
+    const args = ["respawn", params.project, String(params.issue)];
+    if (params.force) args.push("--force");
+    try {
+      const { appendFileSync } = require("node:fs");
+      try { appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [respawn] ${AOC} ${args.join(" ")}\n`); } catch {}
+      const result = execFileSync(AOC, args, { encoding: "utf8" });
+      return { content: [{ type: "text" as const, text: result.trim() }], details: undefined };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Respawn failed: ${e.stderr || e.message}` }], details: undefined };
     }
   },
 });
@@ -1860,6 +1926,38 @@ const commentMrTool = defineTool({
   },
 });
 
+const markMrReviewedTool = defineTool({
+  name: "mark_mr_reviewed",
+  label: "Mark MR reviewed (silent ALL-CLEAR)",
+  description: "Record a review ALL-CLEAR on a merge request — no vendangeur turn, no re-dispatch. Requires a `summary` of what was checked: it is posted as an UNMARKED note on the MR (visible to humans, invisible to the agent pipeline — it carries no conductor marker so it never wakes the vendangeur) naming the reviewing maître, then applies the `pinard:reviewed` label (via `aoc mark-mr-reviewed`). Does not approve the MR — approval is the human/forge's responsibility. Use this instead of comment_mr when your review found no actionable feedback; use comment_mr when there IS feedback to forward to the vendangeur.",
+  parameters: Type.Object({
+    project: Type.String({ description: "Vigne/project name from vignes.yaml" }),
+    mr: Type.Number({ description: "Merge request IID (number)" }),
+    summary: Type.String({ description: "What was checked — required, posted as an unmarked, human-visible MR note naming the reviewing maître" }),
+  }),
+  async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    if (!params.summary || !params.summary.trim()) {
+      return { content: [{ type: "text" as const, text: "summary is required and must not be blank — state what was checked." }], details: undefined };
+    }
+    try {
+      const { execFileSync } = require("node:child_process");
+      const repo = resolveProjectRepo(params.project);
+      if (!repo) return { content: [{ type: "text" as const, text: `Project "${params.project}" not found in vignes.yaml` }], details: undefined };
+      execFileSync(AOC, [
+        "mark-mr-reviewed",
+        "--project", params.project,
+        "--mr", String(params.mr),
+        "--summary", params.summary,
+        "--parcelle", PARCELLE,
+      ], { encoding: "utf8" });
+      const prLabel = resolveVigneProvider(params.project) === "github" ? `PR #${params.mr}` : `MR !${params.mr}`;
+      return { content: [{ type: "text" as const, text: `Marked ${prLabel} (${params.project}) reviewed — no vendangeur turn; posted an unmarked review note.` }], details: undefined };
+    } catch (e: any) {
+      return { content: [{ type: "text" as const, text: `Failed: ${e.stderr || e.message}` }], details: undefined };
+    }
+  },
+});
+
 const listWorkersTool = defineTool({
   name: "list_workers",
   label: "List Vendangeurs",
@@ -1872,7 +1970,8 @@ const listWorkersTool = defineTool({
     }
     const lines = workers.map((w) => {
       const mr = w.mr ? (w.pressoir === "github" ? `PR #${w.mr}` : `MR !${w.mr}`) : "—";
-      return `${w.name} | ${w.project} | ${mr} | ${w.status}`;
+      const health = w.errored ? ` | ⚠ errored: ${w.lastError || ""}` : w.stalled ? " | ⚠ stalled" : "";
+      return `${w.name} | ${w.project} | ${mr} | ${w.status}${health}`;
     });
     return { content: [{ type: "text" as const, text: `Session | Project | MR | Status\n${lines.join("\n")}` }], details: undefined };
   },
@@ -1988,17 +2087,18 @@ function buildFallbackReport(): string | null {
 
 // handleMaitreNeedsReview — maître-only. On a needs_review notification from the
 // daemon watcher: deliver a structured review prompt to the maître LLM so it can
-// inspect the diff and post a signed review comment.
-// The maître NEVER approves automatically — approval is a human or forge-side act.
-// `aoc pressoir approve-pr` remains available as a manual CLI tool for operators
-// acting on explicit instruction, but is not invoked from this automatic path.
+// inspect the diff and either forward feedback or record a silent ALL-CLEAR.
 //
-// The review MUST be posted via the `comment_mr` tool, not raw `aoc pressoir
-// comment-pr`: the conductor and vendangeur share a git-host identity, so an
-// unmarked note is silently dropped by the mr-watcher. `comment_mr` marks every
-// review — including pure LGTMs — with the conductor marker so it is always
-// forwarded to the vendangeur. This costs a harmless extra wake-up on LGTM-only
-// reviews; that's cheaper than a silently dropped change-request.
+// Two distinct outcomes, two distinct tools — never raw `aoc pressoir
+// comment-pr`/`approve-pr`:
+// - Actionable feedback → `comment_mr`. The conductor and vendangeur share a
+//   git-host identity, so an unmarked note is silently dropped by the
+//   mr-watcher; `comment_mr` marks it so it is always forwarded.
+// - Nothing to say (ALL-CLEAR) → `mark_mr_reviewed`. This records the review
+//   (a `pinard:reviewed` label, plus a required `summary` posted as an
+//   UNMARKED note naming the reviewing maître — no approval; approval is the
+//   human's, never the owner token) without waking the vendangeur or
+//   triggering re-dispatch.
 function handleMaitreNeedsReview(data: { mr?: number; project?: string; repo?: string; url?: string; sha?: string; session?: string }): void {
   if (!IS_MAITRE) return;
   const { mr, project, repo, url, sha, session } = data;
@@ -2013,15 +2113,16 @@ Please review the changes:
 1. Use \`aoc pressoir get-pr-changes --repo ${repo} --number ${mr}\` to list changed files.
 2. Use \`aoc pressoir list-pr-notes --repo ${repo} --number ${mr}\` to read existing review comments.
 3. Read the relevant changed files to understand the impact.
-4. Post your review with the \`comment_mr\` tool (project: "${project}", mr: ${mr}, body: "<your review>\n\n🍇 Reviewed by the ${PARCELLE} maître"). Always use \`comment_mr\` here, even for a plain LGTM — a plain pressoir comment is invisible to the vendangeur.
+4. If you have actionable feedback, post it with the \`comment_mr\` tool (project: "${project}", mr: ${mr}, body: "<your review>\n\n🍇 Reviewed by the ${PARCELLE} maître") — the vendangeur will receive it as review feedback.
+5. If the review is a genuine ALL-CLEAR with nothing to say, call the \`mark_mr_reviewed\` tool (project: "${project}", mr: ${mr}, summary: "<what you checked>") instead — the summary is required and is posted as an unmarked note (visible to a human, invisible to the agent pipeline) naming the ${PARCELLE} maître; no vendangeur turn, no re-dispatch.
 
-Do NOT approve the MR. Approval is the human owner's or forge's responsibility.
+Never approve or comment via raw pressoir calls, and never use the owner token. \`mark_mr_reviewed\` never approves — approval is the human owner's/forge's responsibility.
 Be thorough but concise.`;
   try {
     if (piRef) piRef.sendUserMessage(prompt, { deliverAs: "followUp" });
-    require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-review] LLM turn triggered for MR !${mr} on ${project} (sha=${sha ?? ""})\n`);
+    appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-review] LLM turn triggered for MR !${mr} on ${project} (sha=${sha ?? ""})\n`);
   } catch (e: any) {
-    try { require("node:fs").appendFileSync(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-review] error triggering LLM: ${e.message}\n`); } catch {}
+    try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-review] error triggering LLM: ${e.message}\n`); } catch {}
   }
 }
 
@@ -2038,9 +2139,9 @@ function handleMaitreReportRequest(correlation_id?: string, context?: string): v
   const prompt = `[report-request from régisseur] Please call \`report_to_regisseur\` now to send a fresh status report about this parcelle.${contextLine} Report once and stop.`;
   try {
     if (piRef) piRef.sendUserMessage(prompt, { deliverAs: "followUp" });
-    require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report-request] LLM turn triggered (corr=${correlation_id ?? ""})\n`);
+    appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report-request] LLM turn triggered (corr=${correlation_id ?? ""})\n`);
   } catch (e: any) {
-    try { require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report-request] error triggering LLM: ${e.message}\n`); } catch {}
+    try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report-request] error triggering LLM: ${e.message}\n`); } catch {}
   }
 }
 
@@ -2078,10 +2179,10 @@ const reportToRegisseurTool = IS_MAITRE ? defineTool({
       const payload = new TextEncoder().encode(JSON.stringify({ report, timestamp, parcelle: PARCELLE, vignoble: VIGNOBLE_NAME, ...(correlation_id ? { correlation_id } : {}) }));
       if (nc) nc.publish(subject, payload);
       if (kvMaitreStatus) await kvMaitreStatus.put(`${VIGNOBLE_NAME}.${PARCELLE}`, payload);
-      try { require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${timestamp} [maitre-report] published to ${subject}${correlation_id ? ` (corr=${correlation_id})` : ""}\n`); } catch {}
+      try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${timestamp} [maitre-report] published to ${subject}${correlation_id ? ` (corr=${correlation_id})` : ""}\n`); } catch {}
       return { content: [{ type: "text" as const, text: `Report sent to régisseur (${subject}).` }], details: undefined };
     } catch (e: any) {
-      try { require("node:fs").appendFileSync(require("node:path").join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report] publish error (non-fatal): ${e.message}\n`); } catch {}
+      try { appendRotating(join(VIGNOBLE, "logs", "conductor.log"), `${new Date().toISOString()} [maitre-report] publish error (non-fatal): ${e.message}\n`); } catch {}
       return { content: [{ type: "text" as const, text: `Report failed (non-fatal): ${e.message}` }], details: undefined };
     }
   },
@@ -3374,9 +3475,11 @@ export default function pinard(pi: ExtensionAPI) {
   pi.registerTool(readIssueTool);
   pi.registerTool(sendMessageTool);
   pi.registerTool(spawnAgentTool);
+  pi.registerTool(respawnIssueTool);
   pi.registerTool(createCuveeTool);
   pi.registerTool(openCuveeMRTool);
   pi.registerTool(commentMrTool);
+  pi.registerTool(markMrReviewedTool);
   pi.registerTool(listWorkersTool);
   pi.registerTool(listParcellesTool);
   pi.registerTool(attachParcelleTool);

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Genentech/pinard/internal/config"
+	"github.com/Genentech/pinard/internal/git"
 	"github.com/Genentech/pinard/internal/pnats"
 	"github.com/Genentech/pinard/internal/session"
 	"github.com/Genentech/pinard/internal/state"
@@ -311,22 +312,9 @@ func reapAgentNow(kv pnats.KVWriter, vb *config.Vignoble, key, name, effectiveVi
 
 // hasOpenMR checks whether the worker (by key or by name) has an open, unmerged
 // MR in the watcher state. Returns false when the MR state cannot be determined.
+// Thin wrapper over state.OpenMR (shared with internal/watcher's respawn guard).
 func hasOpenMR(mrState *state.Store[state.MRWatcherState], key, name string) bool {
-	if mrState == nil {
-		return false
-	}
-	var open bool
-	mrState.Read(func(s *state.MRWatcherState) {
-		for k, entry := range s.Watched {
-			if k != key && entry.Name != name {
-				continue
-			}
-			// post_merge = done; anything else with an MR = open.
-			if entry.MR > 0 && entry.State != "post_merge" && entry.State != "" {
-				open = true
-			}
-		}
-	})
+	_, open := state.OpenMR(mrState, key, name)
 	return open
 }
 
@@ -459,10 +447,10 @@ func reapWorktree(vb *config.Vignoble, project, sessionName string) {
 	}
 	branch, err := worktreeBranch(wtPath)
 	if err == nil && branch != "" {
-		exec.Command("git", "-C", projectPath, "worktree", "remove", wtPath, "--force").Run()
-		exec.Command("git", "-C", projectPath, "branch", "-D", branch).Run()
+		git.WorktreeRemove(projectPath, wtPath)
+		git.DeleteBranch(projectPath, branch)
 	}
-	exec.Command("git", "-C", projectPath, "worktree", "prune").Run()
+	git.WorktreePrune(projectPath)
 }
 
 // gcSockets sweeps /tmp/tmux-<uid>/ for dead webterm test sockets and orphaned

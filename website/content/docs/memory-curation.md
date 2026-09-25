@@ -234,10 +234,17 @@ Key behaviors:
   markers (`What:`, `Why:`, `Where:`, `Learned:`, and similar) are only skipped when
   their description is also trivial. Real observations starting with `**What**:` but
   carrying actual content are still curated (the LLM cleans their titles).
-- **Deduplication** — cosine similarity scan using the **synthesized title's
-  embedding** prevents near-duplicate pages; close matches are updated in place rather
-  than creating a new page. Thresholds are role-aware: prose-heavy types (`decision`,
-  `diagnosis`) use 0.88; all others use 0.92.
+- **Stable identity, not re-derived from the title** — a concept's page path is
+  resolved from the `wiki_mentions` edges recorded between its source entities and the
+  `wiki_doc` on a prior synthesis, so the LLM is free to reword a title on resynthesis
+  (better phrasing, a cleaner summary) without minting a new page. Only a genuinely new
+  concept (no entity yet linked to any doc) falls back to slugging the synthesized
+  title.
+- **Deduplication (fallback)** — for the slug-fallback path, a cosine similarity scan
+  using the **synthesized title's embedding** prevents near-duplicate pages when the
+  edge-based identity above didn't resolve a path; close matches are updated in place
+  rather than creating a new page. Thresholds are role-aware: prose-heavy types
+  (`decision`, `diagnosis`) use 0.88; all others use 0.92.
 - **Human-authored pages are protected** — any page with `source: human` in its
   frontmatter is never overwritten or deleted by the curator.
 - **Reserved files** (`index.md`, `log.md`) are always skipped.
